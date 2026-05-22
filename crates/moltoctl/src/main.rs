@@ -152,6 +152,12 @@ enum Cmd {
         #[arg(long)]
         yes: bool,
     },
+    /// List connected devices: PC/SC readers and FIDO HID authenticators.
+    List {
+        /// Show every HID device, not just those advertising the FIDO usage page.
+        #[arg(long)]
+        all_hid: bool,
+    },
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -352,6 +358,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         session.set_debug(cli.debug);
         let info = session.read_info()?;
         print_info(&info);
+        return Ok(());
+    }
+
+    // List touches neither PC/SC card state nor any HID device — just enumerates.
+    if let Cmd::List { all_hid } = cmd {
+        run_list(*all_hid)?;
         return Ok(());
     }
 
@@ -584,6 +596,55 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         Cmd::FactoryReset { .. } => unreachable!("handled above before auth"),
         Cmd::Probe { .. } => unreachable!("handled above before auth"),
+        Cmd::List { .. } => unreachable!("handled above before auth"),
+    }
+    Ok(())
+}
+
+fn run_list(all_hid: bool) -> Result<(), Box<dyn std::error::Error>> {
+    println!("PC/SC readers:");
+    match Session::list_readers() {
+        Ok(readers) if readers.is_empty() => println!("  (none)"),
+        Ok(readers) => {
+            for r in readers {
+                println!("  {}", r);
+            }
+        }
+        Err(e) => println!("  (unavailable: {})", e),
+    }
+
+    println!();
+    let header = if all_hid {
+        "HID devices:"
+    } else {
+        "FIDO HID devices:"
+    };
+    println!("{}", header);
+    match molto2_hid::enumerate() {
+        Ok(devices) => {
+            let filtered: Vec<_> = devices
+                .into_iter()
+                .filter(|d| all_hid || d.is_fido())
+                .collect();
+            if filtered.is_empty() {
+                println!("  (none)");
+            } else {
+                for d in &filtered {
+                    let tag = if d.is_fido() { " [FIDO]" } else { "" };
+                    println!(
+                        "  {} {:04x}:{:04x} usage={:04x}:{:04x} {}{}",
+                        d.path.display(),
+                        d.vendor_id,
+                        d.product_id,
+                        d.usage_page,
+                        d.usage,
+                        d.product_name,
+                        tag,
+                    );
+                }
+            }
+        }
+        Err(e) => println!("  (unavailable: {})", e),
     }
     Ok(())
 }

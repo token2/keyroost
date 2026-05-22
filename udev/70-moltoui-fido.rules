@@ -1,0 +1,55 @@
+# MoltoUI: udev rules granting unprivileged access to USB FIDO authenticators.
+#
+# Install with:
+#   sudo cp udev/70-moltoui-fido.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger
+#
+# These rules are vendor-keyed rather than HID-usage-keyed so they apply at
+# the USB layer before any /dev/hidraw* node is created — that lets tools
+# enumerate and open the device without root. The TAG+="uaccess" form gives
+# the currently-logged-in seat owner read/write access via systemd-logind
+# instead of relying on group membership.
+
+# Generic FIDO/U2F devices matched by HID usage page (0xF1D0) — works for any
+# vendor as long as their report descriptor follows the spec.
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", \
+    ENV{HID_NAME}=="*", \
+    ATTRS{bInterfaceClass}=="03", \
+    TAG+="uaccess", GROUP="plugdev", MODE="0660"
+
+# Yubico (YubiKey 4, 5, FIDO, Security Key, Bio)
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1050", \
+    TAG+="uaccess", GROUP="plugdev", MODE="0660"
+
+# Feitian (ePass, BioPass, MultiPass)
+SUBSYSTEM=="usb", ATTRS{idVendor}=="096e", \
+    TAG+="uaccess", GROUP="plugdev", MODE="0660"
+
+# SoloKeys / Solo v1 / Solo 2
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="a2ca", \
+    TAG+="uaccess", GROUP="plugdev", MODE="0660"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="5070", \
+    TAG+="uaccess", GROUP="plugdev", MODE="0660"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="50b0", \
+    TAG+="uaccess", GROUP="plugdev", MODE="0660"
+
+# Nitrokey (FIDO, FIDO2, 3, Passkey)
+SUBSYSTEM=="usb", ATTRS{idVendor}=="20a0", \
+    TAG+="uaccess", GROUP="plugdev", MODE="0660"
+
+# HyperFIDO
+SUBSYSTEM=="usb", ATTRS{idVendor}=="2ccf", \
+    TAG+="uaccess", GROUP="plugdev", MODE="0660"
+
+# OnlyKey
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1d50", ATTRS{idProduct}=="60fc", \
+    TAG+="uaccess", GROUP="plugdev", MODE="0660"
+
+# Google Titan
+SUBSYSTEM=="usb", ATTRS{idVendor}=="18d1", ATTRS{idProduct}=="5026", \
+    TAG+="uaccess", GROUP="plugdev", MODE="0660"
+
+# Token2 PIN+ / Release / FIDO2 variants
+SUBSYSTEM=="usb", ATTRS{idVendor}=="349c", \
+    TAG+="uaccess", GROUP="plugdev", MODE="0660"
