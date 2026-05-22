@@ -158,6 +158,24 @@ enum Cmd {
         #[arg(long)]
         all_hid: bool,
     },
+    /// Run `authenticatorGetInfo` against a connected FIDO authenticator.
+    FidoInfo {
+        /// hidraw path to use. If omitted, auto-pick the only connected FIDO device.
+        #[arg(long, value_name = "PATH")]
+        path: Option<std::path::PathBuf>,
+    },
+    /// Run `authenticatorReset`, wiping all credentials on the key.
+    ///
+    /// Most authenticators only accept Reset within ~10s of plug-in and
+    /// require a physical touch. If `--yes` is missing this is a no-op.
+    FidoReset {
+        /// Confirm you really want to wipe credentials.
+        #[arg(long)]
+        yes: bool,
+        /// hidraw path to use. If omitted, auto-pick the only connected FIDO device.
+        #[arg(long, value_name = "PATH")]
+        path: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -364,6 +382,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // List touches neither PC/SC card state nor any HID device — just enumerates.
     if let Cmd::List { all_hid } = cmd {
         run_list(*all_hid)?;
+        return Ok(());
+    }
+
+    // FIDO commands talk to a hidraw device, not the Molto2 PC/SC reader.
+    if let Cmd::FidoInfo { path } = cmd {
+        run_fido_info(path.as_deref())?;
+        return Ok(());
+    }
+    if let Cmd::FidoReset { yes, path } = cmd {
+        if !*yes {
+            return Err("refusing to reset FIDO key without --yes (this wipes credentials)".into());
+        }
+        run_fido_reset(path.as_deref())?;
         return Ok(());
     }
 
@@ -597,6 +628,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Cmd::FactoryReset { .. } => unreachable!("handled above before auth"),
         Cmd::Probe { .. } => unreachable!("handled above before auth"),
         Cmd::List { .. } => unreachable!("handled above before auth"),
+        Cmd::FidoInfo { .. } | Cmd::FidoReset { .. } => {
+            unreachable!("FIDO commands handled above before PC/SC auth")
+        }
     }
     Ok(())
 }
@@ -646,6 +680,120 @@ fn run_list(all_hid: bool) -> Result<(), Box<dyn std::error::Error>> {
         }
         Err(e) => println!("  (unavailable: {})", e),
     }
+    Ok(())
+}
+
+fn resolve_fido_path(
+    explicit: Option<&std::path::Path>,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    if let Some(p) = explicit {
+        return Ok(p.to_path_buf());
+    }
+    let mut fido_devices: Vec<_> = molto2_hid::enumerate()?
+        .into_iter()
+        .filter(|d| d.is_fido())
+        .collect();
+    match fido_devices.len() {
+        0 => Err("no FIDO HID device found. Plug a security key in, or pass --path.".into()),
+        1 => Ok(fido_devices.remove(0).path),
+        n => {
+            let paths: Vec<String> = fido_devices
+                .iter()
+                .map(|d| d.path.display().to_string())
+                .collect();
+            Err(format!(
+                "{} FIDO HID devices found; pass --path to pick one: {}",
+                n,
+                paths.join(", ")
+            )
+            .into())
+        }
+    }
+}
+
+fn format_aaguid(aaguid: &[u8; 16]) -> String {
+    // Standard UUID grouping: 8-4-4-4-12.
+    let mut s = String::with_capacity(36);
+    for (i, b) in aaguid.iter().enumerate() {
+        if matches!(i, 4 | 6 | 8 | 10) {
+            s.push('-');
+        }
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
+fn run_fido_info(path: Option<&std::path::Path>) -> Result<(), Box<dyn std::error::Error>> {
+    let path = resolve_fido_path(path)?;
+    let (mut dev, init) = molto2_ctap::CtapHidDevice::open(&path)?;
+    println!("Device:    {}", path.display());
+    println!(
+        "Channel:   {:#010x} (CTAPHID protocol v{})",
+        init.channel_id, init.protocol_version
+    );
+    println!(
+        "Firmware:  {}.{}.{}",
+        init.device_major, init.device_minor, init.device_build
+    );
+    let mut caps = Vec::new();
+    if init.supports_wink() {
+        caps.push("WINK");
+    }
+    if init.supports_cbor() {
+        caps.push("CBOR");
+    }
+    if init.supports_u2f() {
+        caps.push("U2F");
+    }
+    println!("Caps:      {} (raw 0x{:02X})", caps.join("+"), init.capabilities);
+
+    if !init.supports_cbor() {
+        println!();
+        println!("(device is U2F-only; CTAP2 GetInfo not available)");
+        return Ok(());
+    }
+
+    let info = molto2_ctap::get_info(&mut dev)?;
+    println!();
+    println!("Versions:  {}", info.versions.join(", "));
+    if !info.extensions.is_empty() {
+        println!("Extensions: {}", info.extensions.join(", "));
+    }
+    println!("AAGUID:    {}", format_aaguid(&info.aaguid));
+    if !info.options.is_empty() {
+        let opts: Vec<String> = info
+            .options
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect();
+        println!("Options:   {}", opts.join(", "));
+    }
+    if let Some(n) = info.max_msg_size {
+        println!("MaxMsgSize: {}", n);
+    }
+    if !info.pin_uv_auth_protocols.is_empty() {
+        let v: Vec<String> = info
+            .pin_uv_auth_protocols
+            .iter()
+            .map(|n| n.to_string())
+            .collect();
+        println!("PIN/UV protocols: {}", v.join(", "));
+    }
+    if !info.transports.is_empty() {
+        println!("Transports: {}", info.transports.join(", "));
+    }
+    if let Some(v) = info.firmware_version {
+        println!("CTAP fwVer: {}", v);
+    }
+    Ok(())
+}
+
+fn run_fido_reset(path: Option<&std::path::Path>) -> Result<(), Box<dyn std::error::Error>> {
+    let path = resolve_fido_path(path)?;
+    let (mut dev, _init) = molto2_ctap::CtapHidDevice::open(&path)?;
+    println!("Resetting {} — touch the key now…", path.display());
+    molto2_ctap::reset(&mut dev)?;
+    println!("Reset complete. All credentials wiped, PIN cleared.");
     Ok(())
 }
 

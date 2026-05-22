@@ -1617,6 +1617,7 @@ name = "moltoctl"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "molto2-ctap",
  "molto2-hid",
  "molto2-import",
  "molto2-proto",
