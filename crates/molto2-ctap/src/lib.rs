@@ -15,6 +15,7 @@
 pub mod cbor;
 pub mod client_pin;
 pub mod cmd;
+pub mod cred_mgmt;
 pub mod hid;
 pub mod pin;
 

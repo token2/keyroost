@@ -63,20 +63,20 @@ pub struct PinResponse {
 /// HMAC key callers need to authenticate later requests.
 pub struct PinUvAuthToken {
     pub protocol: u32,
+    /// Random 16-or-32-byte value the authenticator generates per session.
+    /// Used both as the HMAC key for `pinUvAuthParam` on later requests and
+    /// as the identifier the authenticator looks up when verifying them.
     pub token: Vec<u8>,
-    /// HMAC key for authenticating subsequent CTAP commands. For v1 this is
-    /// the token itself; for v2 it's derived per-protocol.
-    pub hmac_key: Vec<u8>,
 }
 
 impl PinUvAuthToken {
-    /// `LEFT(HMAC-SHA-256(hmac_key, data), 16)` — the tag CTAP expects on
-    /// every request that requires PIN/UV auth.
+    /// CTAP `pinUvAuthParam`: HMAC of `data` under the token. v1 truncates
+    /// to 16 bytes, v2 returns the full 32-byte tag.
     pub fn authenticate(&self, data: &[u8]) -> Vec<u8> {
         use hmac::{Hmac, Mac};
         use sha2::Sha256;
-        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&self.hmac_key)
-            .expect("HMAC accepts any key length");
+        let mut mac =
+            <Hmac<Sha256> as Mac>::new_from_slice(&self.token).expect("HMAC accepts any key length");
         mac.update(data);
         let full = mac.finalize().into_bytes();
         if self.protocol == PIN_PROTOCOL_V1 {
@@ -175,7 +175,6 @@ pub fn get_pin_token(
         .map_err(|_| CtapError::InvalidResponseShape("pinToken decrypt failed"))?;
     Ok(PinUvAuthToken {
         protocol: PIN_PROTOCOL_V1,
-        hmac_key: token.clone(),
         token,
     })
 }
@@ -397,7 +396,6 @@ mod tests {
         let t = PinUvAuthToken {
             protocol: PIN_PROTOCOL_V1,
             token: vec![0u8; 16],
-            hmac_key: vec![0u8; 16],
         };
         assert_eq!(t.authenticate(b"hello").len(), 16);
     }

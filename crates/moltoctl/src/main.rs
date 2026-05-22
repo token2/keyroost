@@ -176,6 +176,66 @@ enum Cmd {
         #[arg(long, value_name = "PATH")]
         path: Option<std::path::PathBuf>,
     },
+    /// Print the current PIN retry counter.
+    FidoPinRetries {
+        #[arg(long, value_name = "PATH")]
+        path: Option<std::path::PathBuf>,
+    },
+    /// Set the initial PIN on an authenticator that doesn't have one yet.
+    FidoPinSet {
+        /// Read the new PIN from the given environment variable.
+        #[arg(long, value_name = "VAR", conflicts_with = "new_pin_stdin")]
+        new_pin_env: Option<String>,
+        /// Read the new PIN from stdin (one line, trailing newline stripped).
+        #[arg(long)]
+        new_pin_stdin: bool,
+        #[arg(long, value_name = "PATH")]
+        path: Option<std::path::PathBuf>,
+    },
+    /// Change the existing PIN. Old and new PINs are sourced from env vars
+    /// or stdin (stdin reads two consecutive lines: old then new).
+    FidoPinChange {
+        #[arg(long, value_name = "VAR", conflicts_with = "old_pin_stdin")]
+        old_pin_env: Option<String>,
+        #[arg(long)]
+        old_pin_stdin: bool,
+        #[arg(long, value_name = "VAR", conflicts_with = "new_pin_stdin")]
+        new_pin_env: Option<String>,
+        #[arg(long)]
+        new_pin_stdin: bool,
+        #[arg(long, value_name = "PATH")]
+        path: Option<std::path::PathBuf>,
+    },
+    /// Show resident-credential storage stats (uses pinUvAuthToken).
+    FidoCredsMetadata {
+        #[arg(long, value_name = "VAR", conflicts_with = "pin_stdin")]
+        pin_env: Option<String>,
+        #[arg(long)]
+        pin_stdin: bool,
+        #[arg(long, value_name = "PATH")]
+        path: Option<std::path::PathBuf>,
+    },
+    /// List every resident credential on the authenticator, grouped by RP.
+    FidoCredsList {
+        #[arg(long, value_name = "VAR", conflicts_with = "pin_stdin")]
+        pin_env: Option<String>,
+        #[arg(long)]
+        pin_stdin: bool,
+        #[arg(long, value_name = "PATH")]
+        path: Option<std::path::PathBuf>,
+    },
+    /// Delete a single resident credential by its hex-encoded credentialId.
+    FidoCredsDelete {
+        /// Hex-encoded credentialId as printed by `fido-creds-list`.
+        #[arg(long, value_name = "HEX")]
+        cred_id: String,
+        #[arg(long, value_name = "VAR", conflicts_with = "pin_stdin")]
+        pin_env: Option<String>,
+        #[arg(long)]
+        pin_stdin: bool,
+        #[arg(long, value_name = "PATH")]
+        path: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -395,6 +455,66 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             return Err("refusing to reset FIDO key without --yes (this wipes credentials)".into());
         }
         run_fido_reset(path.as_deref())?;
+        return Ok(());
+    }
+    if let Cmd::FidoPinRetries { path } = cmd {
+        run_fido_pin_retries(path.as_deref())?;
+        return Ok(());
+    }
+    if let Cmd::FidoPinSet {
+        new_pin_env,
+        new_pin_stdin,
+        path,
+    } = cmd
+    {
+        let new_pin = read_secret("new PIN", new_pin_env.as_deref(), *new_pin_stdin)?;
+        run_fido_pin_set(path.as_deref(), &new_pin)?;
+        return Ok(());
+    }
+    if let Cmd::FidoPinChange {
+        old_pin_env,
+        old_pin_stdin,
+        new_pin_env,
+        new_pin_stdin,
+        path,
+    } = cmd
+    {
+        let old_pin = read_secret("old PIN", old_pin_env.as_deref(), *old_pin_stdin)?;
+        let new_pin = read_secret("new PIN", new_pin_env.as_deref(), *new_pin_stdin)?;
+        run_fido_pin_change(path.as_deref(), &old_pin, &new_pin)?;
+        return Ok(());
+    }
+    if let Cmd::FidoCredsMetadata {
+        pin_env,
+        pin_stdin,
+        path,
+    } = cmd
+    {
+        let pin = read_secret("PIN", pin_env.as_deref(), *pin_stdin)?;
+        run_fido_creds_metadata(path.as_deref(), &pin)?;
+        return Ok(());
+    }
+    if let Cmd::FidoCredsList {
+        pin_env,
+        pin_stdin,
+        path,
+    } = cmd
+    {
+        let pin = read_secret("PIN", pin_env.as_deref(), *pin_stdin)?;
+        run_fido_creds_list(path.as_deref(), &pin)?;
+        return Ok(());
+    }
+    if let Cmd::FidoCredsDelete {
+        cred_id,
+        pin_env,
+        pin_stdin,
+        path,
+    } = cmd
+    {
+        let pin = read_secret("PIN", pin_env.as_deref(), *pin_stdin)?;
+        let cred_id_bytes = hex_decode(cred_id)
+            .map_err(|e| format!("--cred-id is not valid hex: {}", e))?;
+        run_fido_creds_delete(path.as_deref(), &pin, &cred_id_bytes)?;
         return Ok(());
     }
 
@@ -628,7 +748,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Cmd::FactoryReset { .. } => unreachable!("handled above before auth"),
         Cmd::Probe { .. } => unreachable!("handled above before auth"),
         Cmd::List { .. } => unreachable!("handled above before auth"),
-        Cmd::FidoInfo { .. } | Cmd::FidoReset { .. } => {
+        Cmd::FidoInfo { .. }
+        | Cmd::FidoReset { .. }
+        | Cmd::FidoPinRetries { .. }
+        | Cmd::FidoPinSet { .. }
+        | Cmd::FidoPinChange { .. }
+        | Cmd::FidoCredsMetadata { .. }
+        | Cmd::FidoCredsList { .. }
+        | Cmd::FidoCredsDelete { .. } => {
             unreachable!("FIDO commands handled above before PC/SC auth")
         }
     }
@@ -795,6 +922,191 @@ fn run_fido_reset(path: Option<&std::path::Path>) -> Result<(), Box<dyn std::err
     molto2_ctap::reset(&mut dev)?;
     println!("Reset complete. All credentials wiped, PIN cleared.");
     Ok(())
+}
+
+fn run_fido_pin_retries(path: Option<&std::path::Path>) -> Result<(), Box<dyn std::error::Error>> {
+    let path = resolve_fido_path(path)?;
+    let (mut dev, _) = molto2_ctap::CtapHidDevice::open(&path)?;
+    let n = molto2_ctap::client_pin::get_pin_retries(&mut dev)?;
+    println!("{} PIN attempt(s) remaining", n);
+    Ok(())
+}
+
+fn run_fido_pin_set(
+    path: Option<&std::path::Path>,
+    new_pin: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let path = resolve_fido_path(path)?;
+    let (mut dev, _) = molto2_ctap::CtapHidDevice::open(&path)?;
+    molto2_ctap::client_pin::set_pin(&mut dev, new_pin)?;
+    println!("PIN set.");
+    Ok(())
+}
+
+fn run_fido_pin_change(
+    path: Option<&std::path::Path>,
+    old_pin: &str,
+    new_pin: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let path = resolve_fido_path(path)?;
+    let (mut dev, _) = molto2_ctap::CtapHidDevice::open(&path)?;
+    molto2_ctap::client_pin::change_pin(&mut dev, old_pin, new_pin)?;
+    println!("PIN changed.");
+    Ok(())
+}
+
+fn run_fido_creds_metadata(
+    path: Option<&std::path::Path>,
+    pin: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    with_credential_manager(path, pin, |mgr| {
+        let meta = mgr.metadata()?;
+        println!(
+            "{} resident credential(s) stored, room for {} more",
+            meta.existing_count, meta.max_remaining
+        );
+        Ok(())
+    })
+}
+
+fn run_fido_creds_list(
+    path: Option<&std::path::Path>,
+    pin: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    with_credential_manager(path, pin, |mgr| {
+        let rps = mgr.list_relying_parties()?;
+        if rps.is_empty() {
+            println!("(no resident credentials)");
+            return Ok(());
+        }
+        for rp in &rps {
+            let creds = mgr.list_credentials(&rp.rp_id_hash)?;
+            let name_suffix = match &rp.name {
+                Some(n) if !n.is_empty() => format!("  ({})", n),
+                _ => String::new(),
+            };
+            let count_suffix = if creds.is_empty() {
+                "  (no credentials)".to_owned()
+            } else {
+                format!("  [{} credential(s)]", creds.len())
+            };
+            println!("{}{}{}", rp.id, name_suffix, count_suffix);
+            for c in &creds {
+                let name_field = match &c.user.name {
+                    Some(n) => format!("  name={:?}", n),
+                    None => String::new(),
+                };
+                let display_field = match &c.user.display_name {
+                    Some(d) => format!("  display={:?}", d),
+                    None => String::new(),
+                };
+                println!(
+                    "  cred {}: user {:?}{}{}",
+                    hex_short(&c.credential_id),
+                    String::from_utf8_lossy(&c.user.id),
+                    name_field,
+                    display_field,
+                );
+                if let Some(alg) = c.algorithm {
+                    println!("       alg={} ({})", alg, cose_algorithm_name(alg));
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
+fn run_fido_creds_delete(
+    path: Option<&std::path::Path>,
+    pin: &str,
+    cred_id: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    with_credential_manager(path, pin, |mgr| {
+        mgr.delete(cred_id)?;
+        println!("Credential {} deleted.", hex_short(cred_id));
+        Ok(())
+    })
+}
+
+/// Open a hidraw device, fetch GetInfo, exchange PIN/UV auth, and hand a
+/// fully-armed `CredentialManager` to the caller. Avoids a self-referential
+/// return type by keeping the device on the stack and using a closure.
+fn with_credential_manager<F>(
+    path: Option<&std::path::Path>,
+    pin: &str,
+    f: F,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    F: for<'a> FnOnce(
+        &mut molto2_ctap::cred_mgmt::CredentialManager<'a>,
+    ) -> Result<(), Box<dyn std::error::Error>>,
+{
+    let path = resolve_fido_path(path)?;
+    let (mut dev, init) = molto2_ctap::CtapHidDevice::open(&path)?;
+    if !init.supports_cbor() {
+        return Err("device is U2F-only; CTAP2 credential management not supported".into());
+    }
+    let info = molto2_ctap::get_info(&mut dev)?;
+    let token = molto2_ctap::client_pin::get_pin_token(&mut dev, pin)?;
+    let mut mgr = molto2_ctap::cred_mgmt::CredentialManager::new(&mut dev, token, &info)?;
+    f(&mut mgr)
+}
+
+fn read_secret(
+    label: &str,
+    env: Option<&str>,
+    from_stdin: bool,
+) -> Result<String, Box<dyn std::error::Error>> {
+    if let Some(var) = env {
+        return std::env::var(var)
+            .map_err(|_| format!("env var {} (for {}) is not set", var, label).into());
+    }
+    if from_stdin {
+        use std::io::BufRead;
+        let stdin = std::io::stdin();
+        let mut line = String::new();
+        stdin.lock().read_line(&mut line)?;
+        return Ok(line.trim_end_matches(['\r', '\n']).to_owned());
+    }
+    Err(format!(
+        "no source for {}: pass --{}env VAR or --{}stdin",
+        label,
+        env_prefix_for(label),
+        env_prefix_for(label),
+    )
+    .into())
+}
+
+fn env_prefix_for(label: &str) -> &'static str {
+    match label {
+        "PIN" => "pin-",
+        "new PIN" => "new-pin-",
+        "old PIN" => "old-pin-",
+        _ => "",
+    }
+}
+
+fn hex_short(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes.iter().take(8) {
+        s.push_str(&format!("{:02x}", b));
+    }
+    if bytes.len() > 8 {
+        s.push('…');
+    }
+    s
+}
+
+fn cose_algorithm_name(alg: i64) -> &'static str {
+    // Just the common FIDO2 algorithm IDs; unknown values get a generic label.
+    match alg {
+        -7 => "ES256",
+        -8 => "EdDSA",
+        -35 => "ES384",
+        -36 => "ES512",
+        -257 => "RS256",
+        _ => "unknown",
+    }
 }
 
 /// INS bytes whose effect is known to be destructive or mutating.
