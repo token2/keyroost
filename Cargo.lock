@@ -1630,6 +1630,8 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "egui",
+ "molto2-ctap",
+ "molto2-hid",
  "molto2-import",
  "molto2-proto",
  "molto2-transport",

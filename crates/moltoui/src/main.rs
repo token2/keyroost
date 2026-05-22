@@ -14,7 +14,28 @@ use molto2_proto::commands::{
 };
 use molto2_transport::{DeviceInfo, Session, TransportError};
 
+use molto2_ctap::{AuthenticatorInfo, CtapHidDevice, InitResponse};
+use molto2_hid::HidDevice;
+
 const PROFILES: u8 = 100;
+
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum ViewTab {
+    #[default]
+    Molto2,
+    SecurityKeys,
+}
+
+#[derive(Default)]
+struct SecurityKeysState {
+    devices: Vec<HidDevice>,
+    selected: Option<usize>,
+    /// CTAP info for `selected`, fetched lazily after selection.
+    info: Option<AuthenticatorInfo>,
+    init: Option<InitResponse>,
+    /// User-facing error from the last enumeration / open / GetInfo call.
+    error: Option<String>,
+}
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -56,6 +77,10 @@ struct App {
     import_dialog: ImportDialog,
     /// Bulk-import dialog state.
     bulk_dialog: BulkDialog,
+    /// Active top-level view tab.
+    view: ViewTab,
+    /// FIDO security-key view state (devices, selected CTAP info, errors).
+    security_keys: SecurityKeysState,
 }
 
 #[derive(Default)]
@@ -537,6 +562,251 @@ impl App {
         );
         false
     }
+
+    fn refresh_security_keys(&mut self) {
+        self.security_keys.error = None;
+        self.security_keys.info = None;
+        self.security_keys.init = None;
+        match molto2_hid::enumerate() {
+            Ok(devices) => {
+                let fido_only: Vec<_> = devices.into_iter().filter(|d| d.is_fido()).collect();
+                let prev_path = self
+                    .security_keys
+                    .selected
+                    .and_then(|i| self.security_keys.devices.get(i).map(|d| d.path.clone()));
+                self.security_keys.devices = fido_only;
+                self.security_keys.selected = prev_path.and_then(|p| {
+                    self.security_keys
+                        .devices
+                        .iter()
+                        .position(|d| d.path == p)
+                });
+            }
+            Err(e) => {
+                self.security_keys.error = Some(format!("enumeration failed: {}", e));
+                self.security_keys.devices.clear();
+                self.security_keys.selected = None;
+            }
+        }
+    }
+
+    /// Open the currently-selected hidraw device, run CTAPHID_INIT and
+    /// authenticatorGetInfo, and cache the result. Blocks the UI briefly —
+    /// CTAP GetInfo typically completes in a few milliseconds.
+    fn fetch_selected_info(&mut self) {
+        self.security_keys.info = None;
+        self.security_keys.init = None;
+        self.security_keys.error = None;
+        let Some(idx) = self.security_keys.selected else {
+            return;
+        };
+        let Some(dev) = self.security_keys.devices.get(idx) else {
+            return;
+        };
+        let path = dev.path.clone();
+        match CtapHidDevice::open(&path) {
+            Ok((mut hid, init)) => {
+                self.security_keys.init = Some(init.clone());
+                if init.supports_cbor() {
+                    match molto2_ctap::get_info(&mut hid) {
+                        Ok(info) => self.security_keys.info = Some(info),
+                        Err(e) => {
+                            self.security_keys.error = Some(format!("GetInfo failed: {}", e))
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                self.security_keys.error = Some(format!(
+                    "could not open {}: {} (have you installed udev/70-moltoui-fido.rules?)",
+                    path.display(),
+                    e
+                ));
+            }
+        }
+    }
+
+    fn render_security_keys(&mut self, ctx: &egui::Context) {
+        egui::SidePanel::left("fido-devices")
+            .resizable(true)
+            .default_width(280.0)
+            .width_range(180.0..=520.0)
+            .show(ctx, |ui| {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.heading("Security keys");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Refresh").clicked() {
+                            self.refresh_security_keys();
+                        }
+                    });
+                });
+                ui.label("FIDO HID devices currently visible.");
+                ui.add_space(4.0);
+
+                if self.security_keys.devices.is_empty() {
+                    ui.colored_label(
+                        ui.visuals().weak_text_color(),
+                        "No FIDO keys detected. Plug one in and click Refresh.",
+                    );
+                }
+
+                let mut click: Option<usize> = None;
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for (i, dev) in self.security_keys.devices.iter().enumerate() {
+                        let selected = self.security_keys.selected == Some(i);
+                        let label = format!(
+                            "{}\n{:04x}:{:04x}  {}",
+                            short_path(&dev.path),
+                            dev.vendor_id,
+                            dev.product_id,
+                            dev.product_name
+                        );
+                        if ui
+                            .selectable_label(selected, label)
+                            .clicked()
+                        {
+                            click = Some(i);
+                        }
+                    }
+                });
+                if let Some(i) = click {
+                    self.security_keys.selected = Some(i);
+                    self.fetch_selected_info();
+                }
+            });
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.add_space(4.0);
+            let Some(idx) = self.security_keys.selected else {
+                ui.heading("No key selected");
+                ui.label("Pick a device from the left panel, or click Refresh.");
+                return;
+            };
+            let Some(dev) = self.security_keys.devices.get(idx).cloned() else {
+                return;
+            };
+
+            ui.heading(if dev.product_name.is_empty() {
+                format!("{}", dev.path.display())
+            } else {
+                dev.product_name.clone()
+            });
+            ui.label(format!(
+                "{}    vendor 0x{:04x}    product 0x{:04x}",
+                dev.path.display(),
+                dev.vendor_id,
+                dev.product_id
+            ));
+            ui.separator();
+
+            if let Some(err) = &self.security_keys.error {
+                ui.colored_label(egui::Color32::from_rgb(220, 110, 110), err);
+                ui.add_space(8.0);
+            }
+
+            if let Some(init) = &self.security_keys.init {
+                kv(ui, "CTAPHID channel", &format!("{:#010x}", init.channel_id));
+                kv(
+                    ui,
+                    "Protocol",
+                    &format!("v{} (capabilities 0x{:02X})", init.protocol_version, init.capabilities),
+                );
+                kv(
+                    ui,
+                    "HID firmware",
+                    &format!("{}.{}.{}", init.device_major, init.device_minor, init.device_build),
+                );
+                let mut caps = Vec::new();
+                if init.supports_wink() {
+                    caps.push("WINK");
+                }
+                if init.supports_cbor() {
+                    caps.push("CBOR");
+                }
+                if init.supports_u2f() {
+                    caps.push("U2F");
+                }
+                kv(ui, "Supports", &caps.join(" + "));
+            }
+
+            if let Some(info) = &self.security_keys.info {
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("authenticatorGetInfo").strong());
+                kv(ui, "Versions", &info.versions.join(", "));
+                if !info.extensions.is_empty() {
+                    kv(ui, "Extensions", &info.extensions.join(", "));
+                }
+                kv(ui, "AAGUID", &format_aaguid(&info.aaguid));
+                if !info.options.is_empty() {
+                    let s: Vec<String> = info
+                        .options
+                        .iter()
+                        .map(|(k, v)| format!("{}={}", k, v))
+                        .collect();
+                    kv(ui, "Options", &s.join(", "));
+                }
+                if let Some(n) = info.max_msg_size {
+                    kv(ui, "MaxMsgSize", &n.to_string());
+                }
+                if !info.pin_uv_auth_protocols.is_empty() {
+                    let s: Vec<String> = info
+                        .pin_uv_auth_protocols
+                        .iter()
+                        .map(|n| n.to_string())
+                        .collect();
+                    kv(ui, "PIN/UV protocols", &s.join(", "));
+                }
+                if !info.transports.is_empty() {
+                    kv(ui, "Transports", &info.transports.join(", "));
+                }
+                if let Some(v) = info.firmware_version {
+                    kv(ui, "CTAP firmware", &v.to_string());
+                }
+            } else if self
+                .security_keys
+                .init
+                .as_ref()
+                .is_some_and(|i| !i.supports_cbor())
+            {
+                ui.add_space(8.0);
+                ui.colored_label(
+                    ui.visuals().weak_text_color(),
+                    "Device is U2F-only — CTAP2 GetInfo not available.",
+                );
+            }
+
+            ui.add_space(12.0);
+            ui.colored_label(
+                ui.visuals().weak_text_color(),
+                "Reset is CLI-only for now: `moltoctl fido-reset --yes`.",
+            );
+        });
+    }
+}
+
+fn kv(ui: &mut egui::Ui, key: &str, value: &str) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(egui::RichText::new(format!("{key}:")).color(ui.visuals().weak_text_color()));
+        ui.label(value);
+    });
+}
+
+fn short_path(p: &std::path::Path) -> String {
+    p.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| p.display().to_string())
+}
+
+fn format_aaguid(aaguid: &[u8; 16]) -> String {
+    let mut s = String::with_capacity(36);
+    for (i, b) in aaguid.iter().enumerate() {
+        if matches!(i, 4 | 6 | 8 | 10) {
+            s.push('-');
+        }
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
 }
 
 fn unix_now() -> u32 {
@@ -548,6 +818,25 @@ fn unix_now() -> u32 {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.view, ViewTab::Molto2, "Molto2");
+                ui.selectable_value(&mut self.view, ViewTab::SecurityKeys, "Security keys");
+            });
+            ui.add_space(2.0);
+        });
+
+        if self.view == ViewTab::SecurityKeys {
+            // First visit: populate the list automatically so the user isn't
+            // staring at an empty pane wondering whether the app is broken.
+            if self.security_keys.devices.is_empty() && self.security_keys.error.is_none() {
+                self.refresh_security_keys();
+            }
+            self.render_security_keys(ctx);
+            return;
+        }
+
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
