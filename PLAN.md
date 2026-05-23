@@ -50,8 +50,38 @@ List / add / delete resident credentials (`credentialManagement`
 subcommands). PIN set / change / verify.
 
 ### Phase 3+ — Reach toward ykman parity
-OATH (overlaps with existing TOTP code), then PIV / OpenPGP / OTP in
-subsequent phases. Each gets its own entry here when its turn comes.
+
+Revised ordering after surveying the Nitrokey 3 / Trussed firmware (the
+same stack the user's Solo 2A+ runs). Key insight: OATH, OpenPGP, and PIV
+are all **CCID/APDU smartcard applets** on these devices, so our existing
+`molto2-transport` PC/SC layer is reusable — each applet just needs generic
+APDU framing plus an `AID SELECT`. We do not need a second transport stack
+for the smartcard applets.
+
+- **Phase 3 — OATH (TOTP/HOTP).** Best next target: reuses our Molto2
+  TOTP/HOTP + base32 code *and* the PC/SC layer. The Nitrokey/Trussed OATH
+  applet uses Yubico's AID (`A0 00 00 05 27 21 01`) and the same core INS
+  codes (`Put`/`Delete`/`List`/`Calculate`/`SendRemaining`), so one command
+  set targets NK3 *and* future YubiKey OATH. Caveat: the Trussed impl
+  removed Yubico's `SetCode`/`Validate` authorization handshake, so
+  provisioning/list/delete interoperate but OATH password-auth diverges —
+  code to the Trussed variant first, treat YubiKey OATH-auth as a later
+  compatibility pass.
+- **Phase 4 — OpenPGP.** Mature (`opcard`, OpenPGP Card spec v3.4) but
+  heavier: full OpenPGP Card APDU set + RSA/curve key management.
+- **PIV — demoted.** Upstream `piv-authenticator` was archived read-only
+  (2025-03); fine as a spec reference but not a priority target.
+- **Yubico OTP — dropped for Trussed devices.** NK3/Solo 2 don't implement
+  the 132-char keyboard OTP applet; HMAC challenge-response is folded into
+  the OATH/secrets app. Revisit only if we target actual YubiKeys.
+
+**Open hardware question gating Phase 3:** the Trussed firmware *has* a CCID
+dispatcher, but `pynitrokey` drives OATH over CTAPHID because CCID "is not
+yet supported" in their library — and it's unconfirmed whether the Solo 2
+exposes a usable USB CCID/PC-SC interface (vs NFC-only). First check when
+hardware arrives: does `moltoctl list` show a PC/SC reader for the Solo 2
+over USB? If yes, the PC/SC-reuse plan holds. If NFC-only, OATH goes over
+CTAPHID vendor command `0x70` and we reuse `molto2-ctap` instead.
 
 ## Dependency posture
 
@@ -96,6 +126,19 @@ compression doesn't lose it:
   `1209:beee`, bootloader `1209:b000`. Firmware management uses a separate
   HID app + NXP ROM protocol, not CTAP2 vendor commands — out of our scope.
 - **Nitrokey 3** shares the Solo 2 firmware stack; USB ID `20a0:42b2`.
+
+### Protocol reference repos (for Phase 3+ work)
+
+- `Nitrokey/nitrokey-3-firmware` — `components/apps/{Cargo.toml,src/lib.rs}`:
+  authoritative applet list and the APDU-vs-CTAPHID dispatch mapping.
+- `Nitrokey/trussed-secrets-app` — OATH/secrets protocol: AID, INS codes
+  (`src/oath.rs`, `src/command.rs`), CTAPHID `0x70` vendor command, and the
+  Yubico-compatibility notes (README) about the removed auth handshake.
+- `Nitrokey/pynitrokey` — reference host client (`nitropy`); shows the
+  CTAPHID secrets transport in practice.
+- `Nitrokey/opcard-rs` — OpenPGP Card v3.4 APDU reference (Phase 4).
+- `Nitrokey/piv-authenticator` — PIV / SP 800-73-4 APDU reference (archived;
+  spec-mapping value only).
 
 ## Working agreements
 
