@@ -26,7 +26,7 @@ SUBSYSTEM=="usb", ATTRS{idVendor}=="1050", \
 SUBSYSTEM=="usb", ATTRS{idVendor}=="096e", \
     TAG+="uaccess", GROUP="plugdev", MODE="0660"
 
-# SoloKeys / Solo v1 / Solo 2
+# SoloKeys Solo 1 (app + bootloader; 0483:a2ca is the Somu form factor)
 SUBSYSTEM=="usb", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="a2ca", \
     TAG+="uaccess", GROUP="plugdev", MODE="0660"
 SUBSYSTEM=="usb", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="5070", \
@@ -34,7 +34,17 @@ SUBSYSTEM=="usb", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="5070", \
 SUBSYSTEM=="usb", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="50b0", \
     TAG+="uaccess", GROUP="plugdev", MODE="0660"
 
-# Nitrokey (FIDO, FIDO2, 3, Passkey)
+# SoloKeys Solo 2 — app mode (FIDO interface) and bootloader mode.
+# Solo 2 does NOT share Solo 1's product IDs; verified against solo2-cli's
+# own 70-solo2.rules. The bootloader rule lets management tools see a key
+# that's been put into DFU, even though it won't speak FIDO there.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="beee", \
+    TAG+="uaccess", GROUP="plugdev", MODE="0660"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="b000", \
+    TAG+="uaccess", GROUP="plugdev", MODE="0660"
+
+# Nitrokey (FIDO, FIDO2, Passkey, and Nitrokey 3 at 20a0:42b2 — the broad
+# vendor match below already covers the Solo-2-derived Nitrokey 3 firmware)
 SUBSYSTEM=="usb", ATTRS{idVendor}=="20a0", \
     TAG+="uaccess", GROUP="plugdev", MODE="0660"
 

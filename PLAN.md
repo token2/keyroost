@@ -70,6 +70,33 @@ compression doesn't lose it:
 - Renaming the project off the `molto2-*` prefix.
 - A web UI or background daemon.
 
+## Deferred follow-ups (not blocking, revisit with hardware)
+
+- **PIN protocol v2 wiring.** `pin.rs` already implements v2 (HKDF-derived
+  split keys, random IV) but `client_pin.rs` hardcodes v1 in every request.
+  Should negotiate from `getInfo.pinUvAuthProtocols` and prefer the device's
+  first-listed protocol. Solo 2 reports `[v2, v1]` — v1 works, but we ignore
+  the stated preference. Wire v2 through the command layer when convenient.
+- **GUI worker thread.** All CTAP calls block egui synchronously; listing
+  many credentials or running Reset (30s touch window) freezes the window.
+  Offload to a thread + channel.
+- **Reset in the GUI.** Currently CLI-only because of the touch-window
+  blocking issue above.
+- **CredentialManager double token fetch.** Unlock fetches the pinUvAuthToken
+  twice because the manager consumes it; split the listing helpers off the
+  manager or make the token `Clone`.
+- **Bootloader-mode detection.** A Solo 2 in DFU enumerates as `1209:b000`
+  and won't speak FIDO; detect and message clearly rather than hang on INIT.
+
+## Hardware compatibility notes
+
+- **Solo 2 / Solo 2A+** (Trussed firmware, Nitrokey-maintained): spec-faithful.
+  Standard `credMgmt` (0x0A), 64-byte CTAPHID, reset = re-plug then touch
+  within 30s (our `RESET_TIMEOUT` already handles this). USB IDs: app
+  `1209:beee`, bootloader `1209:b000`. Firmware management uses a separate
+  HID app + NXP ROM protocol, not CTAP2 vendor commands — out of our scope.
+- **Nitrokey 3** shares the Solo 2 firmware stack; USB ID `20a0:42b2`.
+
 ## Working agreements
 
 - All extension work happens on
