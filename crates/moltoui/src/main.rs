@@ -1268,36 +1268,27 @@ impl eframe::App for App {
 
         egui::SidePanel::left("slots")
             .resizable(true)
-            .default_width(220.0)
-            .width_range(120.0..=560.0)
+            .default_width(150.0)
+            .width_range(110.0..=320.0)
             .show(ctx, |ui| {
                 ui.add_space(4.0);
                 ui.heading("Profiles");
-                ui.label("Click to select. Drag the divider to resize.");
+                ui.label("Click a slot to edit it.");
                 ui.add_space(4.0);
+                // One full-width row per profile, mirroring the Security Keys
+                // device list. A compact list (rather than a 100-cell grid)
+                // keeps the picker out of the way and leaves room for a
+                // per-device friendly name later (task: device naming).
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    // Compute columns from the actual content width so every slot is reachable
-                    // regardless of how the user has dragged the side-panel divider.
-                    const CELL: f32 = 26.0;
-                    const GAP: f32 = 4.0;
-                    let avail = ui.available_width().max(CELL);
-                    let cols = (((avail + GAP) / (CELL + GAP)).floor() as usize).max(1);
-                    egui::Grid::new("slot-grid")
-                        .num_columns(cols)
-                        .spacing([GAP, GAP])
-                        .show(ui, |ui| {
-                            for p in 0..PROFILES {
-                                let selected = p == self.selected;
-                                let label = format!("{:02}", p);
-                                let btn = egui::SelectableLabel::new(selected, label);
-                                if ui.add_sized([CELL, CELL], btn).clicked() {
-                                    self.selected = p;
-                                }
-                                if (p as usize + 1) % cols == 0 {
-                                    ui.end_row();
-                                }
-                            }
-                        });
+                    let width = ui.available_width();
+                    for p in 0..PROFILES {
+                        let selected = p == self.selected;
+                        let label = format!("Profile {:02}", p);
+                        let btn = egui::SelectableLabel::new(selected, label);
+                        if ui.add_sized([width, 22.0], btn).clicked() {
+                            self.selected = p;
+                        }
+                    }
                 });
             });
 
