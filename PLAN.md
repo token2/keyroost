@@ -83,6 +83,87 @@ hardware arrives: does `moltoctl list` show a PC/SC reader for the Solo 2
 over USB? If yes, the PC/SC-reuse plan holds. If NFC-only, OATH goes over
 CTAPHID vendor command `0x70` and we reuse `molto2-ctap` instead.
 
+## Friendly device names (multi-key selection)
+
+Active workstream (branch `fido2-friendly-names`). Motivation: with more than
+one FIDO key connected (e.g. a signing YubiKey + a test YubiKey), `/dev/hidrawN`
+paths are reassigned on every replug and same-model keys share VID:PID *and*
+AAGUID — so there's no safe, durable way to target a specific physical key, and
+a destructive op against the wrong one is irreversible.
+
+### Privacy & disclosure (opt-in)
+
+Recording information about a user's keys — notably **persisting serials** to
+`keys.json` — is **opt-in**: nothing is written unless the user explicitly runs
+`key-name add`. Reading a serial in memory to resolve a *connected* device is
+fine (ephemeral); persisting it is the gated step. Any option that can lower
+security is disclosed in **plain, concise English** (enough to decide, no walls
+of text), surfaced via a reusable **helper-bubble** component (GUI tooltip; CLI:
+tight `--help` plus a one-line note at the opt-in moment). The helper-bubble is
+a cross-cutting UI item, not specific to this feature.
+
+### Identity source (verified 2026-05-27 on real hardware)
+
+No single mechanism identifies every key — layered resolver:
+1. **USB `iSerialNumber`** via sysfs `ATTRS{serial}`: present on Solo 2
+   (`07A9568F…`, also embedded in its PC/SC reader name) and many others. Free,
+   no device interaction.
+2. **Vendor serial over CCID**: YubiKeys expose **no** USB serial but carry a
+   unique mgmt serial (e.g. `37806840`), read via the management/OTP applet over
+   PC/SC (the YubiKey's CCID interface is a visible reader; moltoctl already
+   speaks PC/SC — dependency-free, no `ykman`). Required for the two-YubiKeys
+   case, which (1) cannot solve.
+3. **AAGUID** from `authenticatorGetInfo`: model-level display only, not
+   per-device identity.
+
+### Config — `~/.config/moltoui/keys.toml`
+
+Array-of-tables, matched on `serial`; `name` is the unique label
+(charset `[a-z0-9_-]`):
+
+    [[key]]
+    name   = "signing-yubikey"
+    serial = "37806840"
+    source = "ccid"      # "usb" | "ccid"
+    vendor = "yubico"
+    aaguid = "…"          # optional
+    note   = "…"          # optional
+
+Tool-managed via `moltoctl key-name add <name> --path <dev>` /
+`key-name list` / `key-name remove <name>`; hand-editing stays possible.
+
+### Selection UX — hybrid (flags + interactive picker)
+
+- `--name <label>` resolves label → serial → live `/dev/hidrawN`. `--path`
+  remains the low-level escape hatch; the two are mutually exclusive and always
+  win when given (scriptable / non-interactive).
+- No flag + a terminal + >1 key → numbered picker read from **`/dev/tty`** (not
+  stdin, which `--pin-stdin` already consumes). Hand-rolled, no prompt crate.
+- No flag + not a TTY + >1 key → error requiring `--name`/`--path`.
+- Exactly one key → use it, printing the resolved target.
+- `moltoctl list` shows the friendly name for any connected, configured key.
+
+### Safety
+
+- Always echo the resolved target before acting (`→ test-solo (Solo 2,
+  /dev/hidraw5)`).
+- >1 key connected → destructive ops must resolve to an explicit target (flag or
+  picker), never a default. `fido-reset` additionally requires a typed
+  confirmation (retype the name); `fido-creds-delete` is gated by explicit
+  targeting alone.
+
+### Architecture
+
+Device identity + resolution lives in a **shared library**, so the CLI (flags +
+picker) and the later `moltoui` GUI (dropdown) are thin front-ends over one
+resolver.
+
+### Build order
+
+1. USB-serial resolver + `keys.toml` load + `key-name add/list/remove` +
+   `--name`/picker plumbing + `list` name column + the safety guard.
+2. YubiKey CCID mgmt-serial read (unlocks the two-YubiKey case).
+
 ## Dependency posture
 
 `CLAUDE.md` mandates "vendor over depend." Restated here so context
@@ -142,11 +223,14 @@ compression doesn't lose it:
 
 ## Working agreements
 
-- All extension work happens on
-  `claude/moltoui-security-key-integration-qm12e` until that branch
-  merges; only then does new work go elsewhere.
-- Don't push to remote without explicit user permission (per CLAUDE.md).
-  Local commits and pushing to the working branch are fine; opening PRs
-  is not, unless asked.
+- Work happens on short-lived feature branches off `main` (current:
+  `fido2-friendly-names`), fast-forwarded into `main` at defined milestones.
+  The original `security-key-integration` branch has merged into `main` and
+  been deleted.
+- `main` is protected: signed commits, linear history, no force/delete. Land
+  work with a fast-forward (`git checkout main && git merge --ff-only <branch>
+  && git push`), which preserves commit signatures — *not* GitHub "Rebase and
+  merge", which rewrites commits and strips their signatures.
+- Don't push or open/merge PRs without explicit user permission (per CLAUDE.md).
 - This document is the durable anchor. When a session loses context, the
   next session should read `PLAN.md` first.
