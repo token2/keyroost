@@ -14,6 +14,7 @@ tool. Workspace contains:
 | `molto2-hid` | USB HID enumeration of FIDO devices via sysfs | none |
 | `molto2-ctap` | FIDO2/CTAP-HID transport, CBOR, PIN protocols, credential mgmt | none |
 | `molto2-oath` | Pure-Rust Yubico/Trussed OATH (TOTP/HOTP) byte layer (APDU + TLV) | none |
+| `molto2-openpgp` | Pure-Rust OpenPGP Card v3.4 byte layer (APDU + BER-TLV) | none |
 | `molto2-keyring` | Friendly-name registry (`keys.json`); serial matching, no hardware | `serde`, `serde_json` |
 | `molto2-resolve` | Shared key-identity resolution (USB + CCID serials, topology match) | in-tree only |
 | `molto2-import` | otpauth:// + Aegis / 2FAS / otpauth-list parsers | `serde`, `serde_json` (behind `bulk` feature) |
