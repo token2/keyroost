@@ -86,10 +86,19 @@ YubiKey. So OATH goes over PC/SC for **both** stacks; the CTAPHID `0x70` fallbac
 is not needed. (Earlier worry came from `pynitrokey` driving OATH over CTAPHID
 because *their* library lacks CCID support — not a device limitation.)
 
-The pure-Rust OATH byte layer now exists in `crates/molto2-oath` (APDU builders,
-TLV parsing, RFC-4226 truncation, known-answer tests). What remains for Phase 3
-is the transport wiring: a generic reader connect + `61xx`/`SEND_REMAINING`
-reassembly in `molto2-transport`, then `moltoctl`/`moltoui` OATH commands.
+The pure-Rust OATH byte layer lives in `crates/molto2-oath` (APDU builders,
+TLV parsing, RFC-4226 truncation, known-answer tests).
+
+**Phase 3 transport + CLI — DONE (2026-05-29).** `molto2_transport::OathSession`
+drives the applet over PC/SC: reader connect, SELECT, the `61xx`/`SEND_REMAINING`
+reassembly loop, and `list`/`calculate_totp`/`put`/`delete`. `moltoctl oath
+{list,code,add,delete}` wraps it, with reader selection mirroring the FIDO picker
+posture (auto-use a lone OATH key, `--reader <substr>` to choose, refuse to guess
+among several) and the base32 secret read via stdin/env, never argv. Verified on
+hardware: a put→code→delete round-trip on a YubiKey produced a code matching
+`oathtool` for the RFC 6238 seed, and SELECT+LIST work on the Solo 2 too. Still
+TODO: OATH password auth (`SET_CODE`/`VALIDATE`, Trussed-divergent), HOTP add, and
+a `moltoui` OATH pane.
 
 ## Friendly device names (multi-key selection)
 
@@ -113,11 +122,11 @@ a cross-cutting UI item, not specific to this feature.
 ### Identity source (verified 2026-05-27 on real hardware)
 
 No single mechanism identifies every key — layered resolver:
-1. **USB `iSerialNumber`** via sysfs `ATTRS{serial}`: present on Solo 2
-   (`07A9568F…`, also embedded in its PC/SC reader name) and many others. Free,
+1. **USB `iSerialNumber`** via sysfs `ATTRS{serial}`: present on Solo 2 (a 32-hex
+   string, also embedded in its PC/SC reader name) and many others. Free,
    no device interaction.
 2. **Vendor serial over CCID**: YubiKeys expose **no** USB serial but carry a
-   unique mgmt serial (e.g. `37806840`), read via the management/OTP applet over
+   unique 8-digit decimal mgmt serial, read via the management/OTP applet over
    PC/SC (the YubiKey's CCID interface is a visible reader; moltoctl already
    speaks PC/SC — dependency-free, no `ykman`). Required for the two-YubiKeys
    case, which (1) cannot solve.
@@ -131,7 +140,7 @@ Array-of-tables, matched on `serial`; `name` is the unique label
 
     [[key]]
     name   = "signing-yubikey"
-    serial = "37806840"
+    serial = "00000000"   # illustrative; real values not recorded here
     source = "ccid"      # "usb" | "ccid"
     vendor = "yubico"
     aaguid = "…"          # optional
@@ -178,7 +187,8 @@ resolver.
    `busnum`/`devnum` vs the reader's PC/SC `CHANNEL_ID`), so two connected
    YubiKeys are never confused; it falls back to the unambiguous single-reader
    case and otherwise refuses to guess. Verified on hardware with two YubiKeys
-   (serials `37806840` @ bus9/dev53, `27717893` @ bus9/dev54) + a Solo 2.
+   on the same USB bus (distinct device addresses, distinct CCID serials) + a
+   Solo 2.
 3. **Done.** Shared-resolver extraction + GUI front-end. The CCID/topology/serial
    logic moved out of `moltoctl` into a new `molto2-resolve` crate (depends on
    keyring + hid + transport; pure `molto2-keyring` stays hardware-free), so both
