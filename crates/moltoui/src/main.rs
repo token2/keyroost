@@ -28,6 +28,7 @@ enum ViewTab {
     Molto2,
     SecurityKeys,
     Oath,
+    OpenPgp,
 }
 
 #[derive(Default)]
@@ -124,6 +125,22 @@ struct OathAddDialog {
     require_touch: bool,
 }
 
+/// State for the OpenPGP pane. Like OATH, the applet is driven over PC/SC, so a
+/// reader name identifies the card. Read-only status for now.
+#[derive(Default)]
+struct OpenPgpState {
+    /// Names of connected readers whose OpenPGP applet responds.
+    readers: Vec<String>,
+    /// Index into `readers` of the selected card.
+    selected: Option<usize>,
+    /// Last status read from the selected card.
+    status: Option<molto2_transport::OpenPgpStatus>,
+    /// User-facing error from the last operation.
+    error: Option<String>,
+    /// True once a status has been fetched for the current selection.
+    loaded: bool,
+}
+
 /// A unit of work applied back to the [`App`] on the UI thread once a background
 /// job finishes. Returned by the job closure and run inside `update()`.
 type ApplyFn = Box<dyn FnOnce(&mut App) + Send>;
@@ -209,6 +226,8 @@ struct App {
     security_keys: SecurityKeysState,
     /// OATH (TOTP) view state.
     oath: OathState,
+    /// OpenPGP view state.
+    openpgp: OpenPgpState,
     /// Background worker for blocking device I/O. `None` only in tests.
     worker: Option<Worker>,
     /// Number of in-flight background jobs. While >0 the UI shows a spinner and
@@ -1974,6 +1993,198 @@ impl App {
             self.security_keys.reset = ResetDialog::default();
         }
     }
+
+    // --- OpenPGP pane ----------------------------------------------------
+
+    /// (Re)enumerate readers whose OpenPGP applet responds. Resets per-card state.
+    fn refresh_openpgp_readers(&mut self) {
+        self.openpgp.error = None;
+        self.openpgp.status = None;
+        self.openpgp.loaded = false;
+        let prev = self
+            .openpgp
+            .selected
+            .and_then(|i| self.openpgp.readers.get(i).cloned());
+        self.spawn_job("Scanning for OpenPGP cards\u{2026}", move || {
+            let result =
+                molto2_transport::OpenPgpSession::list_openpgp_readers().map_err(|e| e.to_string());
+            Box::new(move |app: &mut App| match result {
+                Ok(readers) => {
+                    app.openpgp.readers = readers;
+                    app.openpgp.selected = prev
+                        .and_then(|p| app.openpgp.readers.iter().position(|r| *r == p))
+                        .or(if app.openpgp.readers.is_empty() { None } else { Some(0) });
+                }
+                Err(e) => {
+                    app.openpgp.error = Some(format!("enumeration failed: {e}"));
+                    app.openpgp.readers.clear();
+                    app.openpgp.selected = None;
+                }
+            })
+        });
+    }
+
+    fn selected_openpgp_reader(&self) -> Option<String> {
+        self.openpgp.readers.get(self.openpgp.selected?).cloned()
+    }
+
+    /// Read the selected card's status on the worker thread.
+    fn load_openpgp_status(&mut self) {
+        self.openpgp.error = None;
+        let Some(name) = self.selected_openpgp_reader() else {
+            self.openpgp.error = Some("no OpenPGP card selected".into());
+            return;
+        };
+        self.spawn_job("Reading OpenPGP status\u{2026}", move || {
+            let result = (|| -> Result<molto2_transport::OpenPgpStatus, TransportError> {
+                let mut session = molto2_transport::OpenPgpSession::open(&name)?;
+                session.status()
+            })();
+            Box::new(move |app: &mut App| match result {
+                Ok(status) => {
+                    app.openpgp.status = Some(status);
+                    app.openpgp.loaded = true;
+                }
+                Err(e) => app.openpgp.error = Some(e.to_string()),
+            })
+        });
+    }
+
+    fn render_openpgp(&mut self, ctx: &egui::Context) {
+        egui::SidePanel::left("openpgp-readers")
+            .resizable(true)
+            .default_width(280.0)
+            .width_range(180.0..=520.0)
+            .show(ctx, |ui| {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.heading("OpenPGP cards");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Refresh").clicked() {
+                            self.refresh_openpgp_readers();
+                        }
+                    });
+                });
+                ui.label("Security keys with an OpenPGP applet.");
+                ui.add_space(4.0);
+
+                if self.openpgp.readers.is_empty() {
+                    ui.colored_label(
+                        ui.visuals().weak_text_color(),
+                        "No OpenPGP-capable card detected. Plug one in and click Refresh.",
+                    );
+                }
+
+                let mut clicked: Option<usize> = None;
+                for (i, name) in self.openpgp.readers.iter().enumerate() {
+                    let selected = self.openpgp.selected == Some(i);
+                    if ui.selectable_label(selected, name).clicked() {
+                        clicked = Some(i);
+                    }
+                }
+                if let Some(i) = clicked {
+                    self.openpgp.selected = Some(i);
+                    self.openpgp.status = None;
+                    self.openpgp.loaded = false;
+                    self.openpgp.error = None;
+                }
+            });
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.add_space(4.0);
+            if self.selected_openpgp_reader().is_none() {
+                ui.heading("No OpenPGP card selected");
+                ui.label("Pick a card from the left panel, or click Refresh.");
+                return;
+            }
+
+            if let Some(err) = &self.openpgp.error {
+                ui.colored_label(egui::Color32::from_rgb(220, 110, 110), err);
+                ui.add_space(6.0);
+            }
+
+            ui.horizontal(|ui| {
+                if ui.button("Read status").clicked() {
+                    self.load_openpgp_status();
+                }
+                helper_bubble(
+                    ui,
+                    "Reads the card's public status (AID/serial, key algorithms \
+                     and fingerprints, PIN retry counters, signature count). \
+                     Read-only — no PIN or touch required.",
+                );
+            });
+            ui.separator();
+
+            if !self.openpgp.loaded {
+                ui.label("Click \u{201c}Read status\u{201d} to read this card.");
+                return;
+            }
+            let Some(status) = &self.openpgp.status else {
+                return;
+            };
+
+            kv(ui, "AID", &hex_lower(&status.aid));
+            if let Some(serial) = status.serial() {
+                kv(ui, "Serial", &format!("{serial} (0x{serial:08X})"));
+            }
+            kv(
+                ui,
+                "Signature key",
+                &format!("{}  {}", algo_id_label(status.sig_algo_id), fpr_label(&status.fingerprint_sig)),
+            );
+            kv(
+                ui,
+                "Decryption key",
+                &format!("{}  {}", algo_id_label(status.dec_algo_id), fpr_label(&status.fingerprint_dec)),
+            );
+            kv(
+                ui,
+                "Authentication key",
+                &format!("{}  {}", algo_id_label(status.aut_algo_id), fpr_label(&status.fingerprint_aut)),
+            );
+            kv(
+                ui,
+                "PIN retries",
+                &format!("PW1={} RC={} PW3={}", status.tries_pw1, status.tries_rc, status.tries_pw3),
+            );
+            kv(
+                ui,
+                "Signatures made",
+                &status.signature_count.map_or("(unavailable)".to_string(), |n| n.to_string()),
+            );
+        });
+    }
+}
+
+/// Map an OpenPGP algorithm id (first attribute byte) to a short label.
+fn algo_id_label(id: Option<u8>) -> &'static str {
+    match id {
+        Some(0x01) => "RSA",
+        Some(0x12) => "ECDH",
+        Some(0x13) => "ECDSA",
+        Some(0x16) => "EdDSA",
+        Some(_) => "other",
+        None => "none",
+    }
+}
+
+/// Render a 20-byte fingerprint, or "(no key)" when the slot is all-zero.
+fn fpr_label(fpr: &[u8; 20]) -> String {
+    if fpr.iter().all(|&b| b == 0) {
+        "(no key)".to_string()
+    } else {
+        hex_lower(fpr)
+    }
+}
+
+/// Lowercase hex of a byte slice.
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
 }
 
 fn kv(ui: &mut egui::Ui, key: &str, value: &str) {
@@ -2049,6 +2260,7 @@ impl eframe::App for App {
                 ui.selectable_value(&mut self.view, ViewTab::Molto2, "Molto2");
                 ui.selectable_value(&mut self.view, ViewTab::SecurityKeys, "Security keys");
                 ui.selectable_value(&mut self.view, ViewTab::Oath, "OATH");
+                ui.selectable_value(&mut self.view, ViewTab::OpenPgp, "OpenPGP");
                 if self.busy() {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spinner();
@@ -2076,6 +2288,14 @@ impl eframe::App for App {
                 self.refresh_oath_readers();
             }
             self.render_oath(ctx);
+            return;
+        }
+
+        if self.view == ViewTab::OpenPgp {
+            if self.openpgp.readers.is_empty() && self.openpgp.error.is_none() {
+                self.refresh_openpgp_readers();
+            }
+            self.render_openpgp(ctx);
             return;
         }
 

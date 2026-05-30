@@ -88,8 +88,34 @@ for the smartcard applets.
   `moltoctl openpgp status` prints AID/serial, key algorithms + fingerprints, PIN
   retry counters, and the signature count. Verified on a real YubiKey 5.7 (its
   OpenPGP serial equals the CCID/mgmt serial used for friendly names); the Solo 2
-  is correctly skipped. Still TODO: PUT DATA / key generation / PSO signing / PIN
-  verify (writes), and a GUI pane.
+  is correctly skipped.
+  **GUI pane DONE (2026-05-30):** an "OpenPGP" tab in `moltoui` with a reader list
+  (same no-guess posture) and a read-only status view (AID/serial, per-key
+  algorithm + fingerprint, PIN retry counters, signature count) driven through the
+  worker thread. Verified it renders headlessly against a live YubiKey.
+  **Writes (CLI) DONE (2026-05-30):** the byte layer gained the operation builders
+  (`generate_key`/`read_public_key` CRT, `pso_compute_signature`/`pso_decipher`,
+  `change_reference_data`) + an RSA public-key parser, all under byte-exact KAT
+  tests. `OpenPgpSession` adds `verify_pin` (decodes both the spec `63Cx` form and
+  the YubiKey `6982` form — for the latter it reads PW status to report real
+  remaining tries), `read_public_key`, `generate_key`, and `sign`. `moltoctl
+  openpgp` gains `verify`, `public-key`, and `generate-key` (PINs via env/stdin
+  only, never argv; generate gated by `--yes` + admin PIN). Hardware-verified on a
+  YubiKey: status, public-key on an empty slot (`6581`), and PIN verify incl.
+  wrong-PIN retry counting and counter recovery.
+  **Reset + full write round-trip DONE (2026-05-30):** added `openpgp reset`
+  (`OpenPgpSession::factory_reset`) which — like `ykman` — *blocks* PW1 and PW3 by
+  exhausting their retry counters with wrong guesses, then issues TERMINATE DF +
+  ACTIVATE FILE, so it works unconditionally (incl. forgotten-PIN recovery) and
+  never needs the real PIN. (First cut tried a bare TERMINATE and the YubiKey
+  refused with `6982` — TERMINATE needs PW3 rights *or* both PINs blocked; the
+  block-first approach is the fix.) Verified the whole write path end-to-end on
+  the test YubiKey, leaving the card pristine: reset → verify default admin PW3 →
+  `generate-key` (RSA-2048, e=65537) → `public-key` read-back (modulus + exponent
+  from the `7F49` long-form TLV) → `reset` → both slots empty (`6581`), PINs back
+  to 3/0/3. Still TODO: PUT DATA (cardholder name/URL/fingerprint-timestamp so a
+  generated key is gpg-usable) and a GUI for the write operations (the pane is
+  read-only status for now).
 - **PIV — demoted.** Upstream `piv-authenticator` was archived read-only
   (2025-03); fine as a spec reference but not a priority target.
 - **Yubico OTP — dropped for Trussed devices.** NK3/Solo 2 don't implement
