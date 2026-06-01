@@ -54,7 +54,37 @@ matches 'echo[^|;&]*\$\{?[[:alnum:]_]*(PIN|PASS|PASSWORD|PASSPHRASE|SECRET|TOKEN
 
 # --- 2. Reading files that commonly hold secrets ----------------------------
 # Covers both shell readers (cat/less/grep ...) and the Read tool's file_path.
-matches '(\.env([^[:alnum:]]|$)|\.pem([^[:alnum:]]|$)|id_rsa|id_ed25519|/\.ssh/|credentials|\.nmconnection|wpa_supplicant|(^|[^[:alnum:]_])psk=)' \
+#
+# Exemption: paths under the scratch dir below hold only *disposable OpenPGP
+# test keys* generated during hardware bring-up (e.g. a throwaway RSA key to
+# import into a test YubiKey). They are intentionally allowed so trace/import
+# flows can run in-session. Real secrets — $HOME keys, .ssh, .env, WiFi configs —
+# stay blocked because they don't live under this prefix. Keep the prefix
+# narrow; never widen it to a directory that could hold a real key.
+#
+# The scratch dir lives under $XDG_RUNTIME_DIR (per-user, mode 0700) — NOT
+# world-writable /tmp. That closes a symlink-planting bypass: in shared /tmp,
+# another user could create `/tmp/moltoui-test/x.pem -> ~victim/.ssh/id_rsa`,
+# and the exemption would strip the path and let the read through. A 0700
+# per-user runtime dir can't be written by anyone else, so a symlink there is
+# the user's own. If XDG_RUNTIME_DIR is unset, the exemption is disabled
+# entirely (we scan the full command) rather than guess an unsafe location.
+test_key_dir="${XDG_RUNTIME_DIR:-}/moltoui-test/"
+# Apply the exemption by stripping scratch-dir tokens before the secret scan —
+# but ONLY when XDG_RUNTIME_DIR is set AND the command contains no `..`.
+# Otherwise a traversal path like
+# `$XDG_RUNTIME_DIR/moltoui-test/../../home/user/.ssh/id_rsa` would be stripped
+# wholesale (the `[^[:space:]]*` swallows the `..` and everything after),
+# bypassing the scan and exposing a real key. In either unsafe case we fail
+# closed and scan the full, unstripped command, so traversal can never reach a
+# real secret.
+if [ -n "${XDG_RUNTIME_DIR:-}" ] && ! printf '%s' "$arg" | grep -q '\.\.'; then
+    scan="$(printf '%s' "$arg" | sed -E "s@${test_key_dir}[^[:space:]]*@@g")"
+else
+    scan="$arg"
+fi
+
+printf '%s' "$scan" | grep -Eiq '(\.env([^[:alnum:]]|$)|\.pem([^[:alnum:]]|$)|id_rsa|id_ed25519|/\.ssh/|credentials|\.nmconnection|wpa_supplicant|(^|[^[:alnum:]_])psk=)' \
     && block 'this touches a file that commonly holds secrets (keys, .env, SSH, WiFi/NetworkManager configs).'
 
 exit 0
