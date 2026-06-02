@@ -17,6 +17,7 @@ tool. Workspace contains:
 | `keyroost-openpgp` | Pure-Rust OpenPGP Card v3.4 byte layer (APDU + BER-TLV) | none |
 | `keyroost-keyring` | Friendly-name registry (`keys.json`); serial matching, no hardware | `serde`, `serde_json` |
 | `keyroost-resolve` | Shared key-identity resolution (USB + CCID serials, topology match) | in-tree only |
+| `keyroost-rsakey` | Host-side RSA-2048 keygen + PKCS#1/PKCS#8 (PEM/DER) loading for OpenPGP import | `rsa`, `rand` (scoped exception) |
 | `keyroost-import` | otpauth:// + Aegis / 2FAS / otpauth-list parsers | `serde`, `serde_json` (behind `bulk` feature) |
 | `keyroostctl` | CLI binary | `clap` |
 | `keyroost` | egui desktop GUI | `eframe`, `egui` |
