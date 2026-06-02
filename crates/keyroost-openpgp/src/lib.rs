@@ -1858,9 +1858,8 @@ mod tests {
         let exponent = [0x01, 0x00, 0x01];
 
         // Inner value: 81-TLV (long form) + 82-TLV (short form).
-        let mut inner = Vec::new();
-        inner.push(0x81);
-        inner.push(0x82); // long form, 2 length bytes
+        // (81 tag, then 82 = long form with 2 length bytes following.)
+        let mut inner = vec![0x81, 0x82];
         inner.push((modulus.len() >> 8) as u8);
         inner.push((modulus.len() & 0xFF) as u8);
         inner.extend_from_slice(&modulus);
@@ -1868,11 +1867,8 @@ mod tests {
         inner.push(exponent.len() as u8);
         inner.extend_from_slice(&exponent);
 
-        // Wrap in 7F49 (2-byte tag) with long-form length.
-        let mut blob = Vec::new();
-        blob.push(0x7F);
-        blob.push(0x49);
-        blob.push(0x82);
+        // Wrap in 7F49 (2-byte tag) with long-form length (82 = 2 length bytes).
+        let mut blob = vec![0x7F, 0x49, 0x82];
         blob.push((inner.len() >> 8) as u8);
         blob.push((inner.len() & 0xFF) as u8);
         blob.extend_from_slice(&inner);

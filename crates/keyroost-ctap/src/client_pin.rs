@@ -584,7 +584,7 @@ mod tests {
         assert!(validate_pin(&"x".repeat(64)).is_err());
     }
 
-    fn find<'a>(map: &'a [(Value, Value)], key: u64) -> Option<&'a Value> {
+    fn find(map: &[(Value, Value)], key: u64) -> Option<&Value> {
         map.iter()
             .find(|(k, _)| k.as_uint() == Some(key))
             .map(|(_, v)| v)
