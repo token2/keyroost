@@ -7,6 +7,10 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod ui;
+use ui::device::{self, CapTab, Caps, DeviceId, DeviceKind, UiDevice};
+use ui::theme::{self, BtnKind, Mode, Palette};
+
 use eframe::egui;
 use keyroost_import::parse_otpauth;
 use keyroost_proto::commands::{
@@ -21,15 +25,6 @@ use keyroost_hid::HidDevice;
 use keyroost_keyring::Keyring;
 
 const PROFILES: u8 = 100;
-
-#[derive(Default, Clone, Copy, PartialEq, Eq)]
-enum ViewTab {
-    #[default]
-    Molto2,
-    SecurityKeys,
-    Oath,
-    OpenPgp,
-}
 
 #[derive(Default)]
 struct SecurityKeysState {
@@ -197,6 +192,18 @@ impl OpenPgpSlotSel {
     }
 }
 
+/// State for the PIV pane. Read-only today: a status snapshot driven over PC/SC,
+/// keyed (like OATH/OpenPGP) by the selected device's reader name.
+#[derive(Default)]
+struct PivState {
+    /// Last status read from the selected card.
+    status: Option<keyroost_transport::PivStatus>,
+    /// User-facing error from the last read.
+    error: Option<String>,
+    /// True once a status has been fetched for the current selection.
+    loaded: bool,
+}
+
 /// A unit of work applied back to the [`App`] on the UI thread once a background
 /// job finishes. Returned by the job closure and run inside `update()`.
 type ApplyFn = Box<dyn FnOnce(&mut App) + Send>;
@@ -235,8 +242,8 @@ impl Worker {
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([960.0, 640.0])
-            .with_min_inner_size([720.0, 480.0])
+            .with_inner_size([1180.0, 760.0])
+            .with_min_inner_size([900.0, 560.0])
             .with_title("keyroost"),
         ..Default::default()
     };
@@ -244,8 +251,31 @@ fn main() -> eframe::Result<()> {
         "keyroost",
         options,
         Box::new(|cc| {
-            cc.egui_ctx.set_visuals(egui::Visuals::dark());
+            // Register IBM Plex Sans + JetBrains Mono so the redesign's type
+            // weights resolve. (Vendored under assets/.)
+            theme::install_fonts(&cc.egui_ctx);
+            // Restore the persisted theme (mode + accent), defaulting to the
+            // refined dark + blue accent the prototype ships with.
+            let (mode, accent_idx) = cc
+                .storage
+                .map(|s| {
+                    let mode = if s.get_string("mode").as_deref() == Some("light") {
+                        Mode::Light
+                    } else {
+                        Mode::Dark
+                    };
+                    let accent_idx = s
+                        .get_string("accent")
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(0)
+                        .min(Palette::ACCENTS.len() - 1);
+                    (mode, accent_idx)
+                })
+                .unwrap_or((Mode::Dark, 0));
+            Palette::new(mode, Palette::ACCENTS[accent_idx]).apply(&cc.egui_ctx, mode);
             let app = App {
+                mode,
+                accent_idx,
                 worker: Some(Worker::spawn(cc.egui_ctx.clone())),
                 ..Default::default()
             };
@@ -266,8 +296,8 @@ struct App {
     customer_key_input: String,
     /// Treat customer_key_input as hex vs ASCII.
     customer_key_hex: bool,
-    /// Currently selected profile (0..PROFILES-1).
-    selected: u8,
+    /// Currently selected Molto2 profile slot (0..PROFILES-1).
+    slot: u8,
     /// Draft of the form fields for `selected` (per-slot; cleared on slot switch).
     draft: Draft,
     /// Rolling log of operations (newest last).
@@ -276,14 +306,44 @@ struct App {
     import_dialog: ImportDialog,
     /// Bulk-import dialog state.
     bulk_dialog: BulkDialog,
-    /// Active top-level view tab.
-    view: ViewTab,
-    /// FIDO security-key view state (devices, selected CTAP info, errors).
+    /// Unified device list (physical keys + Molto2 tokens), most recent scan.
+    devices: Vec<UiDevice>,
+    /// Selected device id — stable across refreshes so the pane doesn't jump
+    /// when an *unrelated* key is plugged or unplugged.
+    selected_device: Option<DeviceId>,
+    /// Which capability pane is showing for the selected key.
+    cap_tab: CapTab,
+    /// Error from the last device enumeration, surfaced in the sidebar.
+    devices_error: Option<String>,
+    /// True once the first automatic device scan has been kicked off.
+    scanned: bool,
+    /// Sidebar filter text (filters the visible device list by vendor/model).
+    filter: String,
+    /// FIDO security-key view state (CTAP info, PIN session, errors).
     security_keys: SecurityKeysState,
     /// OATH (TOTP) view state.
     oath: OathState,
     /// OpenPGP view state.
     openpgp: OpenPgpState,
+    /// PIV read-only status view state.
+    piv: PivState,
+    /// Dark / light theme (persisted via eframe storage).
+    mode: Mode,
+    /// Accent index into `Palette::ACCENTS` (persisted).
+    accent_idx: usize,
+    /// Whether the activity-log drawer is open.
+    log_open: bool,
+    /// Open help topic id, or `None` when the popover is closed.
+    help_open: Option<&'static str>,
+    /// Anchor point (the clicked "?" button's left-bottom) for the popover.
+    help_anchor: egui::Pos2,
+    /// OATH "copied" flash: (credential name, expiry unix-secs). Cleared after.
+    copied: Option<(String, f64)>,
+    /// Whether the OATH pane has auto-attempted a read for the current selection
+    /// (so a hard error doesn't retry every frame). Reset on selection change.
+    oath_tried: bool,
+    /// Same guard for the PIV pane's auto-read.
+    piv_tried: bool,
     /// Background worker for blocking device I/O. `None` only in tests.
     worker: Option<Worker>,
     /// Number of in-flight background jobs. While >0 the UI shows a spinner and
@@ -586,7 +646,7 @@ impl App {
             time_step: self.draft.time_step.to_proto(),
             utc_time: unix_now(),
         };
-        let p = self.selected;
+        let p = self.slot;
         let s = self.session.as_mut().expect("auth implies session");
         if let Err(e) = s.set_seed(p, &secret) {
             self.log(Severity::Err, format!("set_seed #{}: {}", p, e));
@@ -607,7 +667,7 @@ impl App {
         if !self.ensure_auth() {
             return;
         }
-        let p = self.selected;
+        let p = self.slot;
         let s = self.session.as_mut().expect("auth implies session");
         match s.sync_time(p, unix_now()) {
             Ok(()) => self.log(Severity::Ok, format!("time synced on #{}", p)),
@@ -674,7 +734,7 @@ impl App {
             Severity::Info,
             format!(
                 "imported draft for #{} from URI; review and click Write profile",
-                self.selected
+                self.slot
             ),
         );
         self.import_dialog.open = false;
@@ -981,13 +1041,9 @@ impl App {
         self.security_keys.info = None;
         self.security_keys.init = None;
         self.security_keys.error = None;
-        let Some(idx) = self.security_keys.selected else {
+        let Some(path) = self.selected_fido_path() else {
             return;
         };
-        let Some(dev) = self.security_keys.devices.get(idx) else {
-            return;
-        };
-        let path = dev.path.clone();
         self.spawn_job("Reading key info\u{2026}", move || {
             // Off-thread: open the hidraw, run INIT + GetInfo.
             let outcome = match CtapHidDevice::open(&path) {
@@ -1196,8 +1252,7 @@ impl App {
     }
 
     fn selected_fido_path(&self) -> Option<std::path::PathBuf> {
-        let idx = self.security_keys.selected?;
-        Some(self.security_keys.devices.get(idx)?.path.clone())
+        self.selected_device().and_then(|d| d.hid_path.clone())
     }
 
     /// Wipe the selected key (authenticatorReset). Runs on the worker thread —
@@ -1640,7 +1695,7 @@ impl App {
     }
 
     fn selected_oath_reader(&self) -> Option<String> {
-        self.oath.readers.get(self.oath.selected?).cloned()
+        self.selected_device().and_then(|d| d.reader.clone())
     }
 
     /// Off-thread helper: open `name` and unlock with `password` if protected.
@@ -2097,7 +2152,7 @@ impl App {
     }
 
     fn selected_openpgp_reader(&self) -> Option<String> {
-        self.openpgp.readers.get(self.openpgp.selected?).cloned()
+        self.selected_device().and_then(|d| d.reader.clone())
     }
 
     /// Read the selected card's status on the worker thread.
@@ -2794,261 +2849,1205 @@ fn unix_now() -> u32 {
         .unwrap_or(0)
 }
 
+// --- Device-centric coordination (selection, theme, per-device loads) --------
+impl App {
+    /// The palette for the current theme + accent.
+    fn palette(&self) -> Palette {
+        Palette::new(self.mode, Palette::ACCENTS[self.accent_idx])
+    }
+
+    /// The currently selected device, if the id still resolves to a present one.
+    fn selected_device(&self) -> Option<&UiDevice> {
+        let id = self.selected_device.as_ref()?;
+        self.devices.iter().find(|d| &d.id == id)
+    }
+
+    /// (Re)build the unified device list off-thread, then re-resolve selection.
+    fn refresh_devices(&mut self) {
+        self.scanned = true;
+        self.spawn_job("Scanning for devices\u{2026}", move || {
+            let result = device::enumerate();
+            Box::new(move |app: &mut App| match result {
+                Ok(devices) => {
+                    app.devices_error = None;
+                    // Keep the current selection if that device is still present;
+                    // otherwise fall back to the first device.
+                    let keep = app
+                        .selected_device
+                        .as_ref()
+                        .filter(|id| devices.iter().any(|d| &d.id == *id))
+                        .cloned();
+                    let next = keep.or_else(|| devices.first().map(|d| d.id.clone()));
+                    let changed = next != app.selected_device;
+                    app.selected_device = next;
+                    app.devices = devices;
+                    if changed {
+                        app.on_device_selected();
+                    }
+                }
+                Err(e) => {
+                    app.devices_error = Some(e);
+                    app.devices.clear();
+                    app.selected_device = None;
+                }
+            })
+        });
+    }
+
+    /// Select a device by id (no-op if already selected).
+    fn select_device(&mut self, id: DeviceId) {
+        if self.selected_device.as_deref() == Some(id.as_str()) {
+            return;
+        }
+        self.selected_device = Some(id);
+        self.on_device_selected();
+    }
+
+    /// Reset per-applet state for a new selection and kick off the cheap,
+    /// no-touch reads (FIDO GetInfo; Molto2 session open). OATH/PGP/PIV reads
+    /// stay deferred to their tab so selecting a key never triggers a surprise
+    /// touch prompt.
+    fn on_device_selected(&mut self) {
+        self.cap_tab = CapTab::Overview;
+        self.security_keys.info = None;
+        self.security_keys.init = None;
+        self.security_keys.session = None;
+        self.security_keys.error = None;
+        self.oath.creds.clear();
+        self.oath.loaded = false;
+        self.oath.locked = false;
+        self.oath.error = None;
+        self.openpgp.status = None;
+        self.openpgp.loaded = false;
+        self.openpgp.error = None;
+        self.piv = PivState::default();
+        self.oath_tried = false;
+        self.piv_tried = false;
+        self.authenticated = false;
+        self.session = None;
+        self.info = None;
+
+        let Some(dev) = self.selected_device().cloned() else {
+            return;
+        };
+        match dev.kind {
+            DeviceKind::Token => self.open_molto(),
+            DeviceKind::Key if dev.caps.has(Caps::FIDO2) => self.fetch_selected_info(),
+            DeviceKind::Key => {}
+        }
+    }
+
+    /// Open the selected Molto2 token's PC/SC session and read its info, so the
+    /// dedicated token pane has a live handle.
+    fn open_molto(&mut self) {
+        let Some(reader) = self.selected_device().and_then(|d| d.reader.clone()) else {
+            return;
+        };
+        self.spawn_job("Opening Molto2\u{2026}", move || {
+            let result = (|| -> Result<(Session, DeviceInfo), TransportError> {
+                let mut s = Session::open_named(&reader)?;
+                let info = s.read_info()?;
+                Ok((s, info))
+            })();
+            Box::new(move |app: &mut App| match result {
+                Ok((s, info)) => {
+                    app.log(Severity::Ok, format!("opened Molto2 {}", info.serial));
+                    app.session = Some(s);
+                    app.info = Some(info);
+                    app.authenticated = false;
+                }
+                Err(e) => app.log(Severity::Err, format!("open Molto2: {e}")),
+            })
+        });
+    }
+
+    /// Read the selected card's read-only PIV status snapshot.
+    fn load_piv_status(&mut self) {
+        self.piv.error = None;
+        let Some(reader) = self.selected_oath_reader() else {
+            return;
+        };
+        self.spawn_job("Reading PIV status\u{2026}", move || {
+            let result = keyroost_transport::PivSession::open(&reader).and_then(|mut s| s.status());
+            Box::new(move |app: &mut App| match result {
+                Ok(status) => {
+                    app.piv.status = Some(status);
+                    app.piv.loaded = true;
+                }
+                Err(e) => app.piv.error = Some(e.to_string()),
+            })
+        });
+    }
+
+    /// Toggle the help popover for `topic`, anchored under the clicked "?".
+    fn toggle_help(&mut self, topic: &'static str, anchor: egui::Pos2) {
+        self.help_anchor = anchor;
+        self.help_open = if self.help_open == Some(topic) {
+            None
+        } else {
+            Some(topic)
+        };
+    }
+}
+
+/// Current unix time as a float (for the OATH "copied" flash window).
+fn now_secs_f64() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// A flat panel frame with a fill and symmetric inner padding.
+fn panel_frame(fill: egui::Color32, mx: f32, my: f32) -> egui::Frame {
+    egui::Frame::none()
+        .fill(fill)
+        .inner_margin(egui::Margin::symmetric(mx, my))
+}
+
+/// A rounded square "glyph tile". `ch = Some(c)` paints a letter; `None` paints a
+/// small clock (the Molto2 token mark).
+fn glyph_tile(ui: &mut egui::Ui, size: f32, fill: egui::Color32, fg: egui::Color32, ch: Option<char>) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    ui.painter()
+        .rect_filled(rect, egui::Rounding::same(size * 0.28), fill);
+    match ch {
+        Some(c) => {
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                c,
+                theme::f_bold(size * 0.5),
+                fg,
+            );
+        }
+        None => {
+            let c = rect.center();
+            let r = size * 0.26;
+            ui.painter().circle_stroke(c, r, egui::Stroke::new(1.6, fg));
+            ui.painter()
+                .line_segment([c, c + egui::vec2(0.0, -r * 0.72)], egui::Stroke::new(1.6, fg));
+            ui.painter()
+                .line_segment([c, c + egui::vec2(r * 0.55, 0.0)], egui::Stroke::new(1.6, fg));
+        }
+    }
+}
+
+/// Does the device match the sidebar filter text?
+fn matches_filter(d: &UiDevice, q: &str) -> bool {
+    let q = q.trim().to_ascii_lowercase();
+    if q.is_empty() {
+        return true;
+    }
+    d.vendor.to_ascii_lowercase().contains(&q)
+        || d.model.to_ascii_lowercase().contains(&q)
+        || d.title().to_ascii_lowercase().contains(&q)
+}
+
+/// Short label for a capability tab.
+fn cap_tab_label(t: CapTab) -> &'static str {
+    match t {
+        CapTab::Overview => "Overview",
+        CapTab::Fido2 => "Passkeys",
+        CapTab::Oath => "Authenticator",
+        CapTab::Pgp => "OpenPGP",
+        CapTab::Piv => "PIV",
+    }
+}
+
+/// Paint one selectable device row; returns true if it was clicked this frame.
+fn device_row(ui: &mut egui::Ui, p: &Palette, dev: &UiDevice, selected: bool) -> bool {
+    let w = ui.available_width();
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 64.0), egui::Sense::click());
+    let bg = if selected {
+        p.raised
+    } else if resp.hovered() {
+        p.line_soft
+    } else {
+        egui::Color32::TRANSPARENT
+    };
+    ui.painter().rect(
+        rect,
+        egui::Rounding::same(11.0),
+        bg,
+        egui::Stroke::new(1.0, if selected { p.line } else { egui::Color32::TRANSPARENT }),
+    );
+    if selected {
+        ui.painter().rect_filled(
+            egui::Rect::from_min_size(
+                rect.left_top() + egui::vec2(0.0, 12.0),
+                egui::vec2(3.0, rect.height() - 24.0),
+            ),
+            egui::Rounding::same(3.0),
+            p.accent,
+        );
+    }
+    let token = dev.kind == DeviceKind::Token;
+    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect.shrink2(egui::vec2(12.0, 9.0))), |ui| {
+        ui.horizontal(|ui| {
+            if token {
+                glyph_tile(ui, 36.0, p.brand_soft(), p.brand, None);
+            } else {
+                glyph_tile(
+                    ui,
+                    36.0,
+                    p.raised2,
+                    p.txt2,
+                    Some(dev.vendor.chars().next().unwrap_or('?').to_ascii_uppercase()),
+                );
+            }
+            ui.add_space(10.0);
+            ui.vertical(|ui| {
+                ui.add_space(1.0);
+                ui.label(egui::RichText::new(&dev.vendor).font(theme::f_sb(11.0)).color(p.txt3));
+                ui.label(egui::RichText::new(dev.title()).font(theme::f_sb(13.5)).color(p.txt));
+                ui.add_space(3.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 5.0;
+                    if token {
+                        theme::pill(ui, "TOTP token", p.brand, p.brand_soft());
+                    } else {
+                        for (cap, label) in [
+                            (Caps::FIDO2, "FIDO2"),
+                            (Caps::OATH, "OATH"),
+                            (Caps::PGP, "PGP"),
+                            (Caps::PIV, "PIV"),
+                        ] {
+                            if dev.caps.has(cap) {
+                                theme::pill(ui, label, p.txt2, p.raised2);
+                            }
+                        }
+                    }
+                });
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                theme::status_dot(ui, p.ok, 7.0);
+            });
+        });
+    });
+    resp.clicked()
+}
+
 impl eframe::App for App {
+    /// Persist the theme so it survives a restart.
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        storage.set_string(
+            "mode",
+            match self.mode {
+                Mode::Dark => "dark",
+                Mode::Light => "light",
+            }
+            .to_string(),
+        );
+        storage.set_string("accent", self.accent_idx.to_string());
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Apply any results from background device jobs before drawing.
         self.drain_worker();
+        let p = self.palette();
+        p.apply(ctx, self.mode);
 
-        egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
-            ui.add_space(2.0);
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.view, ViewTab::Molto2, "Molto2");
-                ui.selectable_value(&mut self.view, ViewTab::SecurityKeys, "Security keys");
-                ui.selectable_value(&mut self.view, ViewTab::Oath, "OATH");
-                ui.selectable_value(&mut self.view, ViewTab::OpenPgp, "OpenPGP");
-                if self.busy() {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        // First frame: scan for devices automatically so the user isn't staring
+        // at an empty pane wondering whether the app is broken.
+        if !self.scanned {
+            self.refresh_devices();
+        }
+
+        self.top_bar(ctx, &p);
+        self.device_sidebar(ctx, &p);
+        if self.log_open {
+            self.activity_log(ctx, &p);
+        }
+        self.central(ctx, &p);
+
+        // Modal dialogs (reused from the per-applet logic) + Molto2 import dialogs.
+        self.render_change_pin_dialog(ctx);
+        self.render_reset_dialog(ctx);
+        self.render_oath_delete_confirm(ctx);
+        self.render_openpgp_confirms(ctx);
+        self.molto_dialogs(ctx, &p);
+
+        // Help popover, painted last so it sits above everything.
+        if let Some(topic) = self.help_open {
+            if ui::help_popover(ctx, &p, topic, self.help_anchor) {
+                self.help_open = None;
+            }
+        }
+
+        // Keep OATH rings / Molto2 time ticking while a device is selected.
+        if self.selected_device.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        }
+    }
+}
+
+// --- Device-centric rendering ------------------------------------------------
+impl App {
+    /// Toggle the help popover for `topic`, anchored under the clicked "?" button.
+    fn help_dot(&mut self, ui: &mut egui::Ui, p: &Palette, topic: &'static str) {
+        let r = ui::help_button(ui, p, self.help_open == Some(topic));
+        if r.clicked() {
+            self.toggle_help(topic, r.rect.left_bottom());
+        }
+    }
+
+    /// Top bar: brand · "keyroost" · connected count | accents · theme · Learn ·
+    /// Activity log · Refresh.
+    fn top_bar(&mut self, ctx: &egui::Context, p: &Palette) {
+        egui::TopBottomPanel::top("bar")
+            .exact_height(52.0)
+            .frame(panel_frame(p.bar, 16.0, 0.0))
+            .show(ctx, |ui| {
+                ui.horizontal_centered(|ui| {
+                    glyph_tile(ui, 26.0, p.brand, p.accent_ink, Some('k'));
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new("keyroost").font(theme::f_bold(14.0)).color(p.txt));
+                    ui.add_space(12.0);
+                    theme::status_dot(ui, p.ok, 7.0);
+                    ui.add_space(5.0);
+                    ui.label(
+                        egui::RichText::new(format!("{} connected", self.devices.len()))
+                            .font(theme::f_reg(12.0))
+                            .color(p.txt2),
+                    );
+                    if self.busy() {
+                        ui.add_space(12.0);
                         ui.spinner();
                         if let Some(label) = &self.busy_label {
-                            ui.label(egui::RichText::new(label.as_str()).weak());
+                            ui.label(egui::RichText::new(label.as_str()).font(theme::f_reg(12.0)).color(p.txt3));
                         }
+                    }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if theme::button(ui, p, BtnKind::Ghost, "Refresh").clicked() {
+                            self.refresh_devices();
+                        }
+                        ui.add_space(4.0);
+                        let log_color = if self.log_open { p.accent } else { p.txt2 };
+                        if ui
+                            .add(
+                                egui::Label::new(
+                                    egui::RichText::new("Activity log").font(theme::f_sb(12.5)).color(log_color),
+                                )
+                                .sense(egui::Sense::click()),
+                            )
+                            .clicked()
+                        {
+                            self.log_open = !self.log_open;
+                        }
+                        ui.add_space(10.0);
+                        ui.hyperlink_to(
+                            egui::RichText::new("Learn \u{2197}").font(theme::f_sb(12.5)).color(p.txt2),
+                            ui::help::LEARN_BASE,
+                        );
+                        ui.add_space(10.0);
+                        if ui
+                            .add(
+                                egui::Label::new(egui::RichText::new("\u{25D0}").font(theme::f_reg(15.0)).color(p.txt2))
+                                    .sense(egui::Sense::click()),
+                            )
+                            .on_hover_text("Toggle light / dark")
+                            .clicked()
+                        {
+                            self.mode = match self.mode {
+                                Mode::Dark => Mode::Light,
+                                Mode::Light => Mode::Dark,
+                            };
+                        }
+                        ui.add_space(10.0);
+                        for (i, c) in Palette::ACCENTS.iter().enumerate().rev() {
+                            let (rect, resp) =
+                                ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click());
+                            let on = i == self.accent_idx;
+                            ui.painter()
+                                .circle_filled(rect.center(), if on { 6.0 } else { 5.0 }, *c);
+                            if on {
+                                ui.painter()
+                                    .circle_stroke(rect.center(), 7.5, egui::Stroke::new(1.5, p.txt));
+                            }
+                            if resp.clicked() {
+                                self.accent_idx = i;
+                            }
+                        }
+                    });
+                });
+            });
+    }
+
+    /// Left device bar: header · filter · rows · footer tip.
+    fn device_sidebar(&mut self, ctx: &egui::Context, p: &Palette) {
+        egui::SidePanel::left("devices")
+            .exact_width(286.0)
+            .resizable(false)
+            .frame(panel_frame(p.side, 14.0, 12.0))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("DEVICES").font(theme::f_bold(11.0)).color(p.txt3));
+                    ui.add_space(6.0);
+                    theme::pill(ui, &self.devices.len().to_string(), p.txt2, p.raised2);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(
+                                egui::Label::new(egui::RichText::new("\u{21BB}").font(theme::f_reg(15.0)).color(p.txt2))
+                                    .sense(egui::Sense::click()),
+                            )
+                            .on_hover_text("Rescan")
+                            .clicked()
+                        {
+                            self.refresh_devices();
+                        }
+                    });
+                });
+                ui.add_space(8.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.filter)
+                        .hint_text("Filter keys\u{2026}")
+                        .desired_width(f32::INFINITY),
+                );
+                ui.add_space(8.0);
+
+                if let Some(err) = &self.devices_error {
+                    ui.colored_label(p.err, err);
+                    ui.add_space(6.0);
+                }
+
+                let mut clicked: Option<DeviceId> = None;
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    if self.devices.is_empty() {
+                        ui.add_space(12.0);
+                        ui.vertical_centered(|ui| {
+                            ui.label(egui::RichText::new("No keys detected yet.").font(theme::f_reg(13.0)).color(p.txt3));
+                        });
+                    }
+                    for dev in self.devices.iter().filter(|d| matches_filter(d, &self.filter)) {
+                        let selected = self.selected_device.as_deref() == Some(dev.id.as_str());
+                        if device_row(ui, p, dev, selected) {
+                            clicked = Some(dev.id.clone());
+                        }
+                        ui.add_space(2.0);
+                    }
+                });
+                if let Some(id) = clicked {
+                    self.select_device(id);
+                }
+
+                // Footer tip (only worth showing once a key is present).
+                if !self.devices.is_empty() {
+                    ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                        ui.add_space(4.0);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            ui.label(egui::RichText::new("Several keys plugged in?").font(theme::f_reg(12.0)).color(p.txt3));
+                            ui.hyperlink_to(
+                                egui::RichText::new("Give them names").font(theme::f_sb(12.0)).color(p.accent),
+                                ui::help::learn_url("/naming"),
+                            );
+                        });
                     });
                 }
             });
-            ui.add_space(2.0);
-        });
+    }
 
-        if self.view == ViewTab::SecurityKeys {
-            // First visit: populate the list automatically so the user isn't
-            // staring at an empty pane wondering whether the app is broken.
-            if self.security_keys.devices.is_empty() && self.security_keys.error.is_none() {
-                self.refresh_security_keys();
-            }
-            self.render_security_keys(ctx);
-            return;
-        }
-
-        if self.view == ViewTab::Oath {
-            if self.oath.readers.is_empty() && self.oath.error.is_none() {
-                self.refresh_oath_readers();
-            }
-            self.render_oath(ctx);
-            return;
-        }
-
-        if self.view == ViewTab::OpenPgp {
-            if self.openpgp.readers.is_empty() && self.openpgp.error.is_none() {
-                self.refresh_openpgp_readers();
-            }
-            self.render_openpgp(ctx);
-            return;
-        }
-
-        egui::TopBottomPanel::top("top").show(ctx, |ui| {
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                let connected = self.session.is_some();
-                if !connected {
-                    if ui.button("Connect").clicked() {
-                        self.connect();
-                    }
-                } else if ui.button("Disconnect").clicked() {
-                    self.disconnect();
-                }
-
-                ui.separator();
-
-                if let Some(info) = self.info.as_ref() {
-                    ui.label(format!("device: {}", info.serial));
-                    ui.label(format!("utc: {}", info.utc_time));
-                } else {
-                    ui.colored_label(ui.visuals().weak_text_color(), "no device");
-                }
-
-                ui.separator();
-
-                ui.label("Customer key:");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.customer_key_input)
-                        .password(true)
-                        .hint_text("(default if empty)")
-                        .desired_width(160.0),
-                );
-                ui.checkbox(&mut self.customer_key_hex, "hex");
-                let can_auth = self.session.is_some() && !self.authenticated;
-                if ui
-                    .add_enabled(can_auth, egui::Button::new("Authenticate"))
-                    .clicked()
-                {
-                    self.authenticate();
-                }
-                if self.authenticated {
-                    ui.colored_label(egui::Color32::from_rgb(120, 200, 130), "authed");
-                }
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Sync time on all").clicked() {
-                        self.sync_time_all();
-                    }
-                });
-            });
-            ui.add_space(4.0);
-        });
-
-        egui::SidePanel::left("slots")
-            .resizable(true)
-            .default_width(150.0)
-            .width_range(110.0..=320.0)
-            .show(ctx, |ui| {
-                ui.add_space(4.0);
-                ui.heading("Profiles");
-                ui.label("Click a slot to edit it.");
-                ui.add_space(4.0);
-                // One full-width row per profile, mirroring the Security Keys
-                // device list. A compact list (rather than a 100-cell grid)
-                // keeps the picker out of the way and leaves room for a
-                // per-device friendly name later (task: device naming).
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    let width = ui.available_width();
-                    for p in 0..PROFILES {
-                        let selected = p == self.selected;
-                        let label = format!("Profile {:02}", p);
-                        let btn = egui::SelectableLabel::new(selected, label);
-                        if ui.add_sized([width, 22.0], btn).clicked() {
-                            self.selected = p;
-                        }
-                    }
-                });
-            });
-
+    /// Global activity-log drawer (bottom), replacing the Molto2-only log.
+    fn activity_log(&mut self, ctx: &egui::Context, p: &Palette) {
         egui::TopBottomPanel::bottom("log")
-            .resizable(true)
-            .min_height(80.0)
+            .exact_height(180.0)
+            .frame(panel_frame(p.bar, 16.0, 10.0))
             .show(ctx, |ui| {
-                ui.add_space(2.0);
-                ui.label("Log");
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("ACTIVITY LOG").font(theme::f_bold(11.0)).color(p.txt3));
+                    ui.add_space(6.0);
+                    theme::pill(ui, "live", p.ok, p.ok_soft());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if theme::button(ui, p, BtnKind::Ghost, "Collapse").clicked() {
+                            self.log_open = false;
+                        }
+                        ui.add_space(4.0);
+                        if theme::button(ui, p, BtnKind::Ghost, "Copy").clicked() {
+                            let all = self.log.iter().map(|l| l.text.clone()).collect::<Vec<_>>().join("\n");
+                            ui.output_mut(|o| o.copied_text = all);
+                        }
+                    });
+                });
+                ui.add_space(6.0);
                 egui::ScrollArea::vertical()
                     .stick_to_bottom(true)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        let visuals = ui.visuals().clone();
                         for line in &self.log {
-                            ui.colored_label(line.severity.color(&visuals), &line.text);
+                            let color = match line.severity {
+                                Severity::Ok => p.ok,
+                                Severity::Warn => p.warn,
+                                Severity::Err => p.err,
+                                Severity::Info => p.txt2,
+                            };
+                            ui.label(egui::RichText::new(&line.text).font(theme::f_mono(12.0)).color(color));
                         }
                     });
             });
+    }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.add_space(4.0);
-            ui.heading(format!("Profile #{:02}", self.selected));
-            ui.separator();
-            egui::Grid::new("edit-grid")
-                .num_columns(2)
-                .spacing([12.0, 6.0])
-                .show(ui, |ui| {
-                    ui.label("Title (≤12):");
-                    ui.add(egui::TextEdit::singleline(&mut self.draft.title).desired_width(220.0));
-                    ui.end_row();
-
-                    ui.label("Secret (base32):");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.draft.secret_base32)
-                            .desired_width(340.0)
-                            .hint_text("e.g. JBSW Y3DP EHPK 3PXP"),
-                    );
-                    ui.end_row();
-
-                    ui.label("Algorithm:");
-                    ui.horizontal(|ui| {
-                        ui.selectable_value(&mut self.draft.algorithm, AlgoChoice::Sha1, "SHA1");
-                        ui.selectable_value(
-                            &mut self.draft.algorithm,
-                            AlgoChoice::Sha256,
-                            "SHA256",
-                        );
-                    });
-                    ui.end_row();
-
-                    ui.label("Digits:");
-                    ui.horizontal(|ui| {
-                        ui.selectable_value(&mut self.draft.digits, DigitsChoice::Four, "4");
-                        ui.selectable_value(&mut self.draft.digits, DigitsChoice::Six, "6");
-                        ui.selectable_value(&mut self.draft.digits, DigitsChoice::Eight, "8");
-                        ui.selectable_value(&mut self.draft.digits, DigitsChoice::Ten, "10");
-                    });
-                    ui.end_row();
-
-                    ui.label("Time step:");
-                    ui.horizontal(|ui| {
-                        ui.selectable_value(&mut self.draft.time_step, StepChoice::S30, "30s");
-                        ui.selectable_value(&mut self.draft.time_step, StepChoice::S60, "60s");
-                    });
-                    ui.end_row();
-
-                    ui.label("Display timeout:");
-                    ui.horizontal(|ui| {
-                        ui.selectable_value(
-                            &mut self.draft.display_timeout,
-                            TimeoutChoice::S15,
-                            "15s",
-                        );
-                        ui.selectable_value(
-                            &mut self.draft.display_timeout,
-                            TimeoutChoice::S30,
-                            "30s",
-                        );
-                        ui.selectable_value(
-                            &mut self.draft.display_timeout,
-                            TimeoutChoice::S60,
-                            "60s",
-                        );
-                        ui.selectable_value(
-                            &mut self.draft.display_timeout,
-                            TimeoutChoice::S120,
-                            "120s",
-                        );
-                    });
-                    ui.end_row();
-                });
-
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                let can_write = self.authenticated;
-                if ui
-                    .add_enabled(can_write, egui::Button::new("Write profile"))
-                    .on_hover_text("Send title, seed, and config to the device")
-                    .clicked()
-                {
-                    self.apply_draft();
-                }
-                if ui
-                    .add_enabled(can_write, egui::Button::new("Sync time"))
-                    .clicked()
-                {
-                    self.sync_time_selected();
-                }
-                if ui.button("Import otpauth://...").clicked() {
-                    self.import_dialog.open = true;
-                }
-                if ui.button("Bulk import...").clicked() {
-                    self.bulk_dialog.open = true;
-                    self.bulk_dialog.start = self.selected;
+    /// The central pane: empty state, the Molto2 token view, or the selected
+    /// key's hero + capability tabs + active capability panel.
+    fn central(&mut self, ctx: &egui::Context, p: &Palette) {
+        egui::CentralPanel::default()
+            .frame(panel_frame(p.surface, 0.0, 0.0))
+            .show(ctx, |ui| match self.selected_device().cloned() {
+                None => self.empty_state(ui, p),
+                Some(dev) if dev.kind == DeviceKind::Token => self.molto_view(ui, p, &dev),
+                Some(dev) => {
+                    egui::Frame::none()
+                        .inner_margin(egui::Margin::symmetric(26.0, 16.0))
+                        .show(ui, |ui| {
+                            self.device_hero(ui, p, &dev);
+                            self.cap_tabs(ui, p, &dev);
+                            ui.add_space(16.0);
+                            match self.cap_tab {
+                                CapTab::Overview => self.overview(ui, p, &dev),
+                                CapTab::Fido2 => self.cap_fido2(ui, p),
+                                CapTab::Oath => self.cap_oath(ui, p),
+                                CapTab::Pgp => self.cap_pgp(ui, p),
+                                CapTab::Piv => self.cap_piv(ui, p),
+                            }
+                        });
                 }
             });
+    }
 
+    /// Welcoming first-run state shown when nothing is plugged in.
+    fn empty_state(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        ui.vertical_centered(|ui| {
+            ui.add_space(120.0);
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(64.0, 64.0), egui::Sense::hover());
+            ui.painter()
+                .rect_stroke(rect, egui::Rounding::same(16.0), egui::Stroke::new(1.5, p.line));
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "\u{1F511}",
+                theme::f_reg(26.0),
+                p.txt3,
+            );
             ui.add_space(16.0);
-            ui.separator();
-            ui.collapsing("Danger zone", |ui| {
+            ui.label(egui::RichText::new("Plug in a security key to begin").font(theme::f_bold(19.0)).color(p.txt));
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new(
+                    "keyroost manages YubiKeys, Nitrokeys, SoloKeys and Token2 tokens. Connect one over USB and it shows up in the list on the left.",
+                )
+                .font(theme::f_reg(13.0))
+                .color(p.txt2),
+            );
+            ui.add_space(18.0);
+            for (n, step) in [
+                "Insert your key into a USB port",
+                "It appears in the Devices list automatically",
+                "Select it to view and manage everything it can do",
+            ]
+            .iter()
+            .enumerate()
+            {
+                ui.horizontal(|ui| {
+                    theme::pill(ui, &format!("{}", n + 1), p.accent, p.accent_soft());
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new(*step).font(theme::f_reg(13.0)).color(p.txt));
+                });
+                ui.add_space(6.0);
+            }
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if theme::button(ui, p, BtnKind::Primary, "Scan for devices").clicked() {
+                    self.refresh_devices();
+                }
+                ui.add_space(8.0);
+                ui.hyperlink_to(
+                    egui::RichText::new("Supported devices \u{2197}").font(theme::f_sb(12.5)).color(p.accent),
+                    ui::help::learn_url("/devices"),
+                );
+            });
+        });
+    }
+
+    /// Device hero strip at the top of a key's pane.
+    fn device_hero(&mut self, ui: &mut egui::Ui, p: &Palette, dev: &UiDevice) {
+        ui.horizontal(|ui| {
+            glyph_tile(ui, 46.0, p.raised2, p.txt2, Some(dev.vendor.chars().next().unwrap_or('?').to_ascii_uppercase()));
+            ui.add_space(12.0);
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(dev.title()).font(theme::f_bold(21.0)).color(p.txt));
+                    ui.add_space(5.0);
+                    self.help_dot(ui, p, "device");
+                });
+                ui.add_space(2.0);
+                let serial = if dev.serial.is_empty() { "\u{2014}".to_string() } else { dev.serial.clone() };
+                let mut meta = format!("{} \u{00B7} #{} \u{00B7} {}", dev.vendor, serial, dev.transport);
+                if !dev.firmware.is_empty() {
+                    meta.push_str(&format!(" \u{00B7} fw {}", dev.firmware));
+                }
+                ui.label(egui::RichText::new(meta).font(theme::f_reg(12.5)).color(p.txt2));
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(egui::RichText::new("Connected").font(theme::f_sb(12.5)).color(p.txt2));
+                ui.add_space(5.0);
+                theme::status_dot(ui, p.ok, 8.0);
+            });
+        });
+        ui.add_space(14.0);
+        let y = ui.cursor().top();
+        ui.painter().hline(ui.max_rect().x_range(), y, egui::Stroke::new(1.0, p.line));
+    }
+
+    /// Capability tab bar under the hero. The active tab gets `txt` + an accent
+    /// underline; the rest are muted.
+    fn cap_tabs(&mut self, ui: &mut egui::Ui, p: &Palette, dev: &UiDevice) {
+        ui.add_space(12.0);
+        let mut next = None;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 20.0;
+            for t in dev.tabs() {
+                let active = self.cap_tab == t;
+                let color = if active { p.txt } else { p.txt3 };
+                let resp = ui.add(
+                    egui::Label::new(egui::RichText::new(cap_tab_label(t)).font(theme::f_sb(13.5)).color(color))
+                        .sense(egui::Sense::click()),
+                );
+                if active {
+                    let y = resp.rect.bottom() + 6.0;
+                    ui.painter().line_segment(
+                        [egui::pos2(resp.rect.left(), y), egui::pos2(resp.rect.right(), y)],
+                        egui::Stroke::new(2.0, p.accent),
+                    );
+                }
+                if resp.clicked() {
+                    next = Some(t);
+                }
+            }
+        });
+        if let Some(t) = next {
+            self.cap_tab = t;
+        }
+    }
+
+    /// A card header row: title · "?" help · right-aligned "Manage →". Returns
+    /// true when Manage is clicked (caller switches `cap_tab`).
+    fn card_head(&mut self, ui: &mut egui::Ui, p: &Palette, title: &str, topic: &'static str) -> bool {
+        let mut go = false;
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(title).font(theme::f_sb(14.5)).color(p.txt));
+            ui.add_space(6.0);
+            self.help_dot(ui, p, topic);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .add_enabled(self.session.is_some(), egui::Button::new("Factory reset"))
-                    .on_hover_text("Wipes all profiles. Requires physical button confirmation.")
+                    .add(
+                        egui::Label::new(egui::RichText::new("Manage \u{2192}").font(theme::f_sb(12.5)).color(p.accent))
+                            .sense(egui::Sense::click()),
+                    )
                     .clicked()
                 {
-                    self.factory_reset();
+                    go = true;
                 }
             });
         });
+        go
+    }
 
+    /// Overview tab: one summary card per capability, each with a `Manage →` jump.
+    fn overview(&mut self, ui: &mut egui::Ui, p: &Palette, dev: &UiDevice) {
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            if dev.caps.has(Caps::FIDO2) {
+                theme::card_frame(p).show(ui, |ui| {
+                    if self.card_head(ui, p, "Passkeys & sign-in (FIDO2)", "fido2") {
+                        self.cap_tab = CapTab::Fido2;
+                    }
+                    ui.add_space(8.0);
+                    match self.security_keys.info.as_ref().and_then(|i| i.option("clientPin")) {
+                        Some(true) => {
+                            ui.horizontal(|ui| {
+                                theme::pill(ui, "PIN set", p.ok, p.ok_soft());
+                                ui.add_space(8.0);
+                                ui.label(
+                                    egui::RichText::new("PIN configured \u{00B7} ready for passkeys")
+                                        .font(theme::f_reg(13.0))
+                                        .color(p.txt2),
+                                );
+                            });
+                        }
+                        Some(false) => {
+                            theme::pill(ui, "No PIN configured", p.warn, p.warn_soft());
+                        }
+                        None => {
+                            ui.label(egui::RichText::new("Reading key\u{2026}").font(theme::f_reg(13.0)).color(p.txt3));
+                        }
+                    }
+                });
+                ui.add_space(14.0);
+            }
+            if dev.caps.has(Caps::OATH) {
+                theme::card_frame(p).show(ui, |ui| {
+                    if self.card_head(ui, p, "Authenticator codes (OATH)", "oath") {
+                        self.cap_tab = CapTab::Oath;
+                    }
+                    ui.add_space(8.0);
+                    if self.oath.loaded && !self.oath.creds.is_empty() {
+                        let total = self.oath.creds.len();
+                        let mut copy = None;
+                        for row in self.oath.creds.iter().take(2) {
+                            let is_copied = self.copied.as_ref().map_or(false, |(n, _)| n == &row.name);
+                            if let (Some(code), _) = oath_row(ui, p, &row.name, row.code.as_deref(), is_copied, false) {
+                                copy = Some((row.name.clone(), code));
+                            }
+                            ui.add_space(6.0);
+                        }
+                        if total > 2 {
+                            ui.label(egui::RichText::new(format!("+{} more codes", total - 2)).font(theme::f_reg(12.5)).color(p.txt3));
+                        }
+                        if let Some((name, code)) = copy {
+                            ui.output_mut(|o| o.copied_text = code);
+                            self.copied = Some((name, now_secs_f64() + 1.2));
+                        }
+                    } else {
+                        ui.label(
+                            egui::RichText::new("Open Authenticator to view live codes.")
+                                .font(theme::f_reg(13.0))
+                                .color(p.txt3),
+                        );
+                    }
+                });
+                ui.add_space(14.0);
+            }
+            if dev.caps.has(Caps::PGP) {
+                theme::card_frame(p).show(ui, |ui| {
+                    if self.card_head(ui, p, "OpenPGP", "pgp") {
+                        self.cap_tab = CapTab::Pgp;
+                    }
+                    ui.add_space(8.0);
+                    if let Some(st) = &self.openpgp.status {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing.x = 5.0;
+                            theme::pill(ui, &format!("Signature \u{00B7} {}", slot_summary(st.sig_algo_id, &st.fingerprint_sig)), p.txt2, p.raised2);
+                            theme::pill(ui, &format!("Encryption \u{00B7} {}", slot_summary(st.dec_algo_id, &st.fingerprint_dec)), p.txt2, p.raised2);
+                            theme::pill(ui, &format!("Auth \u{00B7} {}", slot_summary(st.aut_algo_id, &st.fingerprint_aut)), p.txt2, p.raised2);
+                        });
+                    } else {
+                        ui.label(
+                            egui::RichText::new("Open OpenPGP and Read status to view key slots.")
+                                .font(theme::f_reg(13.0))
+                                .color(p.txt3),
+                        );
+                    }
+                });
+                ui.add_space(14.0);
+            }
+            if dev.caps.has(Caps::PIV) {
+                theme::card_frame(p).show(ui, |ui| {
+                    if self.card_head(ui, p, "PIV smart card", "piv") {
+                        self.cap_tab = CapTab::Piv;
+                    }
+                    ui.add_space(8.0);
+                    if let Some(st) = &self.piv.status {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing.x = 5.0;
+                            for slot in &st.slots {
+                                let lab = format!("{:02X} \u{00B7} {}", slot.slot.key_ref(), if slot.cert_present { "cert" } else { "empty" });
+                                theme::pill(ui, &lab, p.txt2, p.raised2);
+                            }
+                        });
+                    } else {
+                        ui.label(
+                            egui::RichText::new("Open PIV to read certificate slots.")
+                                .font(theme::f_reg(13.0))
+                                .color(p.txt3),
+                        );
+                    }
+                });
+            }
+        });
+    }
+
+    /// FIDO2 / Passkeys tab — reuses the existing PIN + credentials section.
+    fn cap_fido2(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        theme::card_frame(p).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Passkeys (FIDO2)").font(theme::f_sb(14.5)).color(p.txt));
+                ui.add_space(6.0);
+                self.help_dot(ui, p, "fido2");
+            });
+            ui.add_space(8.0);
+            self.render_credentials_section(ui);
+        });
+    }
+
+    /// Authenticator / OATH tab — live codes with countdown rings + copy.
+    fn cap_oath(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        // Auto-attempt a read once per selection (a hard error won't retry).
+        if !self.oath_tried && !self.busy() && self.oath.error.is_none() && !self.oath.locked {
+            self.oath_tried = true;
+            self.load_oath_creds();
+        }
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Authenticator codes").font(theme::f_sb(14.5)).color(p.txt));
+            ui.add_space(6.0);
+            self.help_dot(ui, p, "oath");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if theme::button(ui, p, BtnKind::Primary, "+ Add credential").clicked() {
+                    self.oath.add = OathAddDialog { open: true, totp: true, ..Default::default() };
+                }
+                ui.add_space(6.0);
+                if theme::button(ui, p, BtnKind::Default, "Refresh").clicked() {
+                    self.load_oath_creds();
+                }
+            });
+        });
+        ui.add_space(12.0);
+        if let Some(err) = &self.oath.error {
+            ui.colored_label(p.err, err);
+            ui.add_space(6.0);
+        }
+        self.render_oath_add_form(ui);
+
+        if self.oath.locked {
+            theme::card_frame(p).show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new("This key's OATH applet is password-protected.")
+                        .font(theme::f_reg(13.0))
+                        .color(p.txt),
+                );
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut self.oath.password_input).password(true).desired_width(220.0));
+                    if theme::button(ui, p, BtnKind::Primary, "Unlock").clicked() {
+                        self.load_oath_creds();
+                    }
+                });
+            });
+            return;
+        }
+        if !self.oath.loaded {
+            ui.label(egui::RichText::new("Reading codes\u{2026}").font(theme::f_reg(13.0)).color(p.txt3));
+            return;
+        }
+        if self.oath.creds.is_empty() {
+            ui.label(egui::RichText::new("No authenticator codes on this key.").font(theme::f_reg(13.0)).color(p.txt3));
+            return;
+        }
+
+        let mut copy: Option<(String, String)> = None;
+        let mut delete: Option<String> = None;
+        theme::card_frame(p).show(ui, |ui| {
+            let n = self.oath.creds.len();
+            for (i, row) in self.oath.creds.iter().enumerate() {
+                let is_copied = self.copied.as_ref().map_or(false, |(nm, _)| nm == &row.name);
+                let (c, d) = oath_row(ui, p, &row.name, row.code.as_deref(), is_copied, true);
+                if let Some(code) = c {
+                    copy = Some((row.name.clone(), code));
+                }
+                if d {
+                    delete = Some(row.name.clone());
+                }
+                if i + 1 < n {
+                    ui.add_space(5.0);
+                    let y = ui.cursor().top();
+                    ui.painter().hline(ui.max_rect().x_range(), y, egui::Stroke::new(1.0, p.line_soft));
+                    ui.add_space(5.0);
+                }
+            }
+        });
+        if let Some((name, code)) = copy {
+            ui.output_mut(|o| o.copied_text = code);
+            self.copied = Some((name, now_secs_f64() + 1.2));
+        }
+        if let Some(name) = delete {
+            self.oath.confirm_delete = Some(name);
+        }
+    }
+
+    /// OpenPGP tab — read-only status + the existing management section.
+    fn cap_pgp(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("OpenPGP").font(theme::f_sb(14.5)).color(p.txt));
+            ui.add_space(6.0);
+            self.help_dot(ui, p, "pgp");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if theme::button(ui, p, BtnKind::Default, "Read status").clicked() {
+                    self.load_openpgp_status();
+                }
+            });
+        });
+        ui.add_space(12.0);
+        if let Some(err) = &self.openpgp.error {
+            ui.colored_label(p.err, err);
+            ui.add_space(6.0);
+        }
+        if let Some(notice) = &self.openpgp.notice {
+            ui.colored_label(p.ok, notice);
+            ui.add_space(6.0);
+        }
+        if let Some(status) = &self.openpgp.status {
+            theme::card_frame(p).show(ui, |ui| {
+                kv(ui, "AID", &hex_lower(&status.aid));
+                if let Some(serial) = status.serial() {
+                    kv(ui, "Serial", &format!("{serial} (0x{serial:08X})"));
+                }
+                kv(ui, "Signature key", &format!("{}  {}", algo_id_label(status.sig_algo_id), fpr_label(&status.fingerprint_sig)));
+                kv(ui, "Decryption key", &format!("{}  {}", algo_id_label(status.dec_algo_id), fpr_label(&status.fingerprint_dec)));
+                kv(ui, "Authentication key", &format!("{}  {}", algo_id_label(status.aut_algo_id), fpr_label(&status.fingerprint_aut)));
+                kv(ui, "PIN retries", &format!("PW1={} RC={} PW3={}", status.tries_pw1, status.tries_rc, status.tries_pw3));
+                kv(ui, "Signatures made", &status.signature_count.map_or("(unavailable)".to_string(), |n| n.to_string()));
+            });
+        } else {
+            ui.label(
+                egui::RichText::new("Click Read status to read this card (no PIN or touch).")
+                    .font(theme::f_reg(13.0))
+                    .color(p.txt3),
+            );
+        }
+        ui.add_space(10.0);
+        self.render_openpgp_manage(ui);
+    }
+
+    /// PIV tab — read-only status snapshot (auto-read on first view).
+    fn cap_piv(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        if !self.piv_tried && !self.busy() {
+            self.piv_tried = true;
+            self.load_piv_status();
+        }
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("PIV smart card").font(theme::f_sb(14.5)).color(p.txt));
+            ui.add_space(6.0);
+            self.help_dot(ui, p, "piv");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                theme::pill(ui, "read-only", p.txt3, p.raised2);
+                ui.add_space(6.0);
+                if theme::button(ui, p, BtnKind::Default, "Refresh").clicked() {
+                    self.load_piv_status();
+                }
+            });
+        });
+        ui.add_space(12.0);
+        if let Some(err) = &self.piv.error {
+            ui.colored_label(p.err, err);
+            ui.add_space(6.0);
+        }
+        if let Some(st) = &self.piv.status {
+            theme::card_frame(p).show(ui, |ui| {
+                kv(ui, "Applet version", &st.version.map_or("\u{2014}".to_string(), |(a, b, c)| format!("{a}.{b}.{c}")));
+                kv(ui, "Serial", &st.serial.map_or("\u{2014}".to_string(), |s| s.to_string()));
+                kv(ui, "PIN retries", &st.pin_retries.map_or("\u{2014}".to_string(), |n| n.to_string()));
+                ui.add_space(6.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 5.0;
+                    for slot in &st.slots {
+                        let lab = format!("{:02X} \u{00B7} {}", slot.slot.key_ref(), if slot.cert_present { "cert" } else { "empty" });
+                        theme::pill(ui, &lab, p.txt2, p.raised2);
+                    }
+                });
+            });
+        } else if self.piv.error.is_none() {
+            ui.label(egui::RichText::new("Reading PIV status\u{2026}").font(theme::f_reg(13.0)).color(p.txt3));
+        }
+    }
+
+    /// The Molto2 token's dedicated amber view: hero band · customer-key strip ·
+    /// 100-slot rail + editor.
+    fn molto_view(&mut self, ui: &mut egui::Ui, p: &Palette, dev: &UiDevice) {
+        // Amber hero band.
+        egui::Frame::none()
+            .fill(p.brand_soft())
+            .inner_margin(egui::Margin::symmetric(26.0, 16.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    glyph_tile(ui, 46.0, p.brand, p.accent_ink, None);
+                    ui.add_space(12.0);
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(dev.title()).font(theme::f_bold(21.0)).color(p.txt));
+                            ui.add_space(6.0);
+                            theme::pill(ui, "Programmable TOTP token", p.brand, p.panel);
+                            ui.add_space(4.0);
+                            self.help_dot(ui, p, "molto");
+                        });
+                        ui.add_space(2.0);
+                        let serial = if dev.serial.is_empty() { "\u{2014}".to_string() } else { dev.serial.clone() };
+                        ui.label(
+                            egui::RichText::new(format!("{} \u{00B7} #{} \u{00B7} {} slots", dev.vendor, serial, PROFILES))
+                                .font(theme::f_reg(12.5))
+                                .color(p.txt2),
+                        );
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if theme::button(ui, p, BtnKind::Default, "Sync time on all").clicked() {
+                            self.sync_time_all();
+                        }
+                    });
+                });
+            });
+
+        // Customer-key strip.
+        egui::Frame::none()
+            .inner_margin(egui::Margin::symmetric(26.0, 10.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("\u{1F512} Customer key").font(theme::f_sb(12.5)).color(p.txt2));
+                    ui.add_space(2.0);
+                    self.help_dot(ui, p, "custkey");
+                    ui.add_space(8.0);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.customer_key_input)
+                            .password(true)
+                            .hint_text("default if empty")
+                            .desired_width(180.0),
+                    );
+                    ui.checkbox(&mut self.customer_key_hex, "hex");
+                    if theme::button(ui, p, BtnKind::Default, "Authenticate").clicked() {
+                        self.authenticate();
+                    }
+                    if self.authenticated {
+                        theme::pill(ui, "authed", p.ok, p.ok_soft());
+                    }
+                });
+            });
+
+        // Body: slot rail + editor.
+        egui::Frame::none()
+            .inner_margin(egui::Margin::symmetric(26.0, 8.0))
+            .show(ui, |ui| {
+                ui.horizontal_top(|ui| {
+                    ui.vertical(|ui| {
+                        ui.set_width(200.0);
+                        ui.label(egui::RichText::new(format!("SLOTS \u{00B7} {}", PROFILES)).font(theme::f_bold(11.0)).color(p.txt3));
+                        ui.add_space(6.0);
+                        let mut pick = None;
+                        egui::ScrollArea::vertical().auto_shrink([false, false]).max_height(440.0).show(ui, |ui| {
+                            for s in 0..PROFILES {
+                                let selected = s == self.slot;
+                                let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 32.0), egui::Sense::click());
+                                let bg = if selected {
+                                    p.brand_soft()
+                                } else if resp.hovered() {
+                                    p.line_soft
+                                } else {
+                                    egui::Color32::TRANSPARENT
+                                };
+                                ui.painter().rect(rect, egui::Rounding::same(8.0), bg, egui::Stroke::NONE);
+                                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect.shrink2(egui::vec2(10.0, 4.0))), |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(format!("{:02}", s))
+                                                .font(theme::f_mono(12.0))
+                                                .color(if selected { p.brand } else { p.txt3 }),
+                                        );
+                                        ui.add_space(8.0);
+                                        let (text, color) = if selected && !self.draft.title.trim().is_empty() {
+                                            (self.draft.title.clone(), p.txt)
+                                        } else {
+                                            ("empty".to_string(), p.txt3)
+                                        };
+                                        ui.label(egui::RichText::new(text).font(theme::f_reg(12.5)).color(color));
+                                    });
+                                });
+                                if resp.clicked() {
+                                    pick = Some(s);
+                                }
+                            }
+                        });
+                        if let Some(s) = pick {
+                            self.slot = s;
+                        }
+                    });
+
+                    ui.add_space(22.0);
+
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(format!("SLOT {:02}", self.slot)).font(theme::f_bold(11.0)).color(p.txt3));
+                        });
+                        ui.add_space(10.0);
+                        editor_row(ui, p, "Title", |ui| {
+                            ui.add(egui::TextEdit::singleline(&mut self.draft.title).hint_text("\u{2264} 12 chars").desired_width(300.0));
+                        });
+                        editor_row(ui, p, "Secret", |ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.draft.secret_base32)
+                                    .password(true)
+                                    .hint_text("base32 secret")
+                                    .desired_width(300.0),
+                            );
+                        });
+                        editor_row(ui, p, "Algorithm", |ui| {
+                            let cur = match self.draft.algorithm {
+                                AlgoChoice::Sha1 => "SHA1",
+                                AlgoChoice::Sha256 => "SHA256",
+                            };
+                            if let Some(v) = theme::segmented(ui, p, &["SHA1", "SHA256"], cur, p.brand) {
+                                self.draft.algorithm = if v == "SHA256" { AlgoChoice::Sha256 } else { AlgoChoice::Sha1 };
+                            }
+                        });
+                        editor_row(ui, p, "Digits", |ui| {
+                            let cur = match self.draft.digits {
+                                DigitsChoice::Four => "4",
+                                DigitsChoice::Six => "6",
+                                DigitsChoice::Eight => "8",
+                                DigitsChoice::Ten => "10",
+                            };
+                            if let Some(v) = theme::segmented(ui, p, &["4", "6", "8", "10"], cur, p.brand) {
+                                self.draft.digits = match v.as_str() {
+                                    "4" => DigitsChoice::Four,
+                                    "8" => DigitsChoice::Eight,
+                                    "10" => DigitsChoice::Ten,
+                                    _ => DigitsChoice::Six,
+                                };
+                            }
+                        });
+                        editor_row(ui, p, "Time step", |ui| {
+                            let cur = match self.draft.time_step {
+                                StepChoice::S30 => "30s",
+                                StepChoice::S60 => "60s",
+                            };
+                            if let Some(v) = theme::segmented(ui, p, &["30s", "60s"], cur, p.brand) {
+                                self.draft.time_step = if v == "60s" { StepChoice::S60 } else { StepChoice::S30 };
+                            }
+                        });
+                        editor_row(ui, p, "Display", |ui| {
+                            let cur = match self.draft.display_timeout {
+                                TimeoutChoice::S15 => "15s",
+                                TimeoutChoice::S30 => "30s",
+                                TimeoutChoice::S60 => "60s",
+                                TimeoutChoice::S120 => "120s",
+                            };
+                            if let Some(v) = theme::segmented(ui, p, &["15s", "30s", "60s", "120s"], cur, p.brand) {
+                                self.draft.display_timeout = match v.as_str() {
+                                    "15s" => TimeoutChoice::S15,
+                                    "60s" => TimeoutChoice::S60,
+                                    "120s" => TimeoutChoice::S120,
+                                    _ => TimeoutChoice::S30,
+                                };
+                            }
+                        });
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if theme::button(ui, p, BtnKind::Primary, "Write to slot").clicked() {
+                                self.apply_draft();
+                            }
+                            ui.add_space(6.0);
+                            if theme::button(ui, p, BtnKind::Default, "Import otpauth\u{2026}").clicked() {
+                                self.import_dialog.open = true;
+                            }
+                            ui.add_space(6.0);
+                            if theme::button(ui, p, BtnKind::Default, "Bulk import\u{2026}").clicked() {
+                                self.bulk_dialog.open = true;
+                                self.bulk_dialog.start = self.slot;
+                            }
+                        });
+                    });
+                });
+            });
+    }
+
+    /// The Molto2 import dialogs (otpauth:// + bulk). Reused verbatim from the
+    /// original Molto2 view; only the entry point changed.
+    fn molto_dialogs(&mut self, ctx: &egui::Context, _p: &Palette) {
         if self.bulk_dialog.open {
             let mut open = self.bulk_dialog.open;
             let mut do_load = false;
@@ -3171,7 +4170,7 @@ impl eframe::App for App {
         if self.import_dialog.open {
             let mut open = self.import_dialog.open;
             let mut should_apply = false;
-            egui::Window::new(format!("Import to profile #{:02}", self.selected))
+            egui::Window::new(format!("Import to profile #{:02}", self.slot))
                 .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
@@ -3202,6 +4201,95 @@ impl eframe::App for App {
     }
 }
 
+/// Paint one OATH credential row: issuer/account · code · countdown ring ·
+/// seconds · copy (· delete). Returns `(Some(code) if copy clicked, delete?)`.
+fn oath_row(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    name: &str,
+    code: Option<&str>,
+    is_copied: bool,
+    with_delete: bool,
+) -> (Option<String>, bool) {
+    let (issuer, account) = match name.split_once(':') {
+        Some((a, b)) => (a.to_string(), b.to_string()),
+        None => (name.to_string(), String::new()),
+    };
+    let (secs, pct) = theme::totp_window(30);
+    let code_color = if secs <= 5 { p.warn } else { p.accent };
+    let mut copy = None;
+    let mut delete = false;
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.label(egui::RichText::new(issuer).font(theme::f_sb(13.5)).color(p.txt));
+            if !account.is_empty() {
+                ui.label(egui::RichText::new(account).font(theme::f_reg(12.0)).color(p.txt3));
+            }
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if with_delete {
+                if ui
+                    .add(
+                        egui::Label::new(egui::RichText::new("\u{2715}").font(theme::f_reg(13.0)).color(p.txt3))
+                            .sense(egui::Sense::click()),
+                    )
+                    .on_hover_text("Delete")
+                    .clicked()
+                {
+                    delete = true;
+                }
+                ui.add_space(8.0);
+            }
+            let glyph = if is_copied { "\u{2713}" } else { "\u{29C9}" };
+            let gcolor = if is_copied { p.ok } else { p.txt3 };
+            if ui
+                .add(egui::Label::new(egui::RichText::new(glyph).font(theme::f_reg(15.0)).color(gcolor)).sense(egui::Sense::click()))
+                .on_hover_text("Copy code")
+                .clicked()
+            {
+                if let Some(c) = code {
+                    copy = Some(c.to_string());
+                }
+            }
+            ui.add_space(10.0);
+            ui.label(egui::RichText::new(format!("{secs}s")).font(theme::f_reg(11.0)).color(p.txt3));
+            ui.add_space(5.0);
+            theme::ring(ui, pct, 20.0, code_color, p.line);
+            ui.add_space(14.0);
+            match code {
+                Some(c) => {
+                    ui.label(egui::RichText::new(c).font(theme::f_mono(19.0)).color(code_color));
+                }
+                None => {
+                    ui.label(egui::RichText::new("touch").font(theme::f_reg(13.0)).color(p.txt3));
+                }
+            }
+        });
+    });
+    (copy, delete)
+}
+
+/// One labelled editor row in the Molto2 form: fixed-width label + a field.
+fn editor_row(ui: &mut egui::Ui, p: &Palette, label: &str, add: impl FnOnce(&mut egui::Ui)) {
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [92.0, 22.0],
+            egui::Label::new(egui::RichText::new(label).font(theme::f_reg(13.0)).color(p.txt2)),
+        );
+        add(ui);
+    });
+    ui.add_space(8.0);
+}
+
+/// Summarize an OpenPGP key slot: its algorithm label, or "empty" when no key.
+fn slot_summary(algo: Option<u8>, fpr: &[u8; 20]) -> &'static str {
+    if fpr.iter().all(|&b| b == 0) {
+        "empty"
+    } else {
+        algo_id_label(algo)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3214,7 +4302,7 @@ mod tests {
             worker: Some(Worker::spawn(egui::Context::default())),
             ..Default::default()
         };
-        app.spawn_job("test", || Box::new(|app: &mut App| app.selected = 42));
+        app.spawn_job("test", || Box::new(|app: &mut App| app.slot = 42));
         assert!(app.busy(), "busy should be set right after dispatch");
 
         // Wait for the worker to produce a result, then drain it.
@@ -3227,7 +4315,7 @@ mod tests {
         app.busy_jobs -= 1;
         apply(&mut app);
 
-        assert_eq!(app.selected, 42);
+        assert_eq!(app.slot, 42);
         assert!(!app.busy(), "busy should clear once the result is applied");
     }
 
@@ -3242,7 +4330,7 @@ mod tests {
         // Occupy the worker with a job whose result we don't drain.
         app.spawn_job("first", || Box::new(|_: &mut App| {}));
         assert_eq!(app.busy_jobs, 1);
-        app.spawn_job("second", || Box::new(|app: &mut App| app.selected = 99));
+        app.spawn_job("second", || Box::new(|app: &mut App| app.slot = 99));
         assert_eq!(
             app.busy_jobs, 1,
             "second dispatch must be ignored while busy"
@@ -3255,8 +4343,8 @@ mod tests {
     fn inline_when_no_worker() {
         let mut app = App::default();
         assert!(app.worker.is_none());
-        app.spawn_job("inline", || Box::new(|app: &mut App| app.selected = 7));
-        assert_eq!(app.selected, 7);
+        app.spawn_job("inline", || Box::new(|app: &mut App| app.slot = 7));
+        assert_eq!(app.slot, 7);
         assert!(!app.busy());
     }
 }

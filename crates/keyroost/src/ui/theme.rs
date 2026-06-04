@@ -13,8 +13,9 @@
 
 use egui::{Color32, FontFamily, FontId, Margin, Response, Rounding, Stroke};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mode {
+    #[default]
     Dark,
     Light,
 }
