@@ -330,6 +330,10 @@ struct App {
     piv_tried: bool,
     /// True while the Molto2 factory-reset confirmation is showing.
     molto_reset_confirm: bool,
+    /// True while the selected device's inline rename field is open.
+    rename_open: bool,
+    /// Friendly-name draft for the selected device.
+    rename_input: String,
     /// Background worker for blocking device I/O. `None` only in tests.
     worker: Option<Worker>,
     /// Number of in-flight background jobs. While >0 the UI shows a spinner and
@@ -868,7 +872,14 @@ impl App {
             // Back on the UI thread: store the results.
             Box::new(move |app: &mut App| match outcome {
                 Ok((init, info)) => {
+                    // Surface the key's firmware on the hero (e.g. "fw 5.7.4").
+                    let fw = format!("{}.{}.{}", init.device_major, init.device_minor, init.device_build);
                     app.security_keys.init = Some(init);
+                    if let Some(id) = app.selected_device.clone() {
+                        if let Some(dev) = app.devices.iter_mut().find(|d| d.id == id) {
+                            dev.firmware = fw;
+                        }
+                    }
                     match info {
                         Some(Ok(info)) => app.security_keys.info = Some(info),
                         Some(Err(e)) => {
@@ -2033,6 +2044,9 @@ impl App {
         self.piv = PivState::default();
         self.oath_tried = false;
         self.piv_tried = false;
+        self.molto_reset_confirm = false;
+        self.rename_open = false;
+        self.rename_input.clear();
         self.authenticated = false;
         self.session = None;
         self.info = None;
@@ -2087,6 +2101,52 @@ impl App {
                 Err(e) => app.piv.error = Some(e.to_string()),
             })
         });
+    }
+
+    /// Persist (or clear) the selected device's friendly name in `keys.json`,
+    /// keyed by its serial. Empty input removes the existing name.
+    fn save_device_name(&mut self) {
+        let Some(dev) = self.selected_device().cloned() else {
+            return;
+        };
+        if dev.serial.is_empty() {
+            self.log(Severity::Warn, "this device exposes no serial, so it can't be named yet");
+            self.rename_open = false;
+            return;
+        }
+        let name = self.rename_input.trim().to_owned();
+        if !name.is_empty() {
+            if let Err(e) = keyroost_keyring::validate_name(&name) {
+                self.log(Severity::Err, format!("invalid name: {e}"));
+                return;
+            }
+        }
+        let mut keyring = keyroost_keyring::Keyring::load_default().unwrap_or_default();
+        // Drop any existing name for this device first (covers rename + clear).
+        if let Some(current) = dev.name.clone() {
+            keyring.remove(&current);
+        }
+        if !name.is_empty() {
+            let entry = keyroost_keyring::KeyEntry {
+                name,
+                serial: dev.serial.clone(),
+                source: keyroost_keyring::IdSource::default(),
+                vendor: Some(dev.vendor.to_ascii_lowercase()),
+                aaguid: None,
+                note: None,
+            };
+            if let Err(e) = keyring.add(entry) {
+                self.log(Severity::Err, format!("name: {e}"));
+                return;
+            }
+        }
+        match keyring.save_default() {
+            Ok(_) => self.log(Severity::Ok, "name saved"),
+            Err(e) => self.log(Severity::Err, format!("save names: {e}")),
+        }
+        self.rename_open = false;
+        self.rename_input.clear();
+        self.refresh_devices();
     }
 
     /// Toggle the help popover for `topic`, anchored under the clicked "?".
@@ -2708,14 +2768,44 @@ impl App {
 
     /// Device hero strip at the top of a key's pane.
     fn device_hero(&mut self, ui: &mut egui::Ui, p: &Palette, dev: &UiDevice) {
+        let mut open_rename = false;
+        let mut do_save = false;
+        let mut do_cancel = false;
         ui.horizontal(|ui| {
             glyph_tile(ui, 46.0, p.raised2, p.txt2, Some(dev.vendor.chars().next().unwrap_or('?').to_ascii_uppercase()));
             ui.add_space(12.0);
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(dev.title()).font(theme::f_bold(21.0)).color(p.txt));
-                    ui.add_space(5.0);
-                    self.help_dot(ui, p, "device");
+                    if self.rename_open {
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(&mut self.rename_input)
+                                .hint_text("friendly-name")
+                                .desired_width(200.0),
+                        );
+                        let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if theme::button(ui, p, BtnKind::Primary, "Save").clicked() || enter {
+                            do_save = true;
+                        }
+                        ui.add_space(4.0);
+                        if theme::button(ui, p, BtnKind::Ghost, "Cancel").clicked() {
+                            do_cancel = true;
+                        }
+                    } else {
+                        ui.label(egui::RichText::new(dev.title()).font(theme::f_bold(21.0)).color(p.txt));
+                        ui.add_space(5.0);
+                        self.help_dot(ui, p, "device");
+                        ui.add_space(8.0);
+                        let label = if dev.name.is_some() { "Rename" } else { "Name this key" };
+                        if ui
+                            .add(
+                                egui::Label::new(egui::RichText::new(label).font(theme::f_sb(12.0)).color(p.accent))
+                                    .sense(egui::Sense::click()),
+                            )
+                            .clicked()
+                        {
+                            open_rename = true;
+                        }
+                    }
                 });
                 ui.add_space(2.0);
                 let serial = if dev.serial.is_empty() { "\u{2014}".to_string() } else { dev.serial.clone() };
@@ -2731,6 +2821,17 @@ impl App {
                 theme::status_dot(ui, p.ok, 8.0);
             });
         });
+        if open_rename {
+            self.rename_open = true;
+            self.rename_input = dev.name.clone().unwrap_or_default();
+        }
+        if do_cancel {
+            self.rename_open = false;
+            self.rename_input.clear();
+        }
+        if do_save {
+            self.save_device_name();
+        }
         ui.add_space(14.0);
         let y = ui.cursor().top();
         ui.painter().hline(ui.max_rect().x_range(), y, egui::Stroke::new(1.0, p.line));
