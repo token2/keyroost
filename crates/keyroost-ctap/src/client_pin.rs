@@ -156,8 +156,18 @@ pub fn get_pin_retries(dev: &mut CtapHidDevice) -> Result<u32, CtapError> {
 }
 
 /// Fetch the authenticator's ephemeral P-256 public key for ECDH.
-pub fn get_key_agreement(dev: &mut CtapHidDevice) -> Result<([u8; 32], [u8; 32]), CtapError> {
-    let req = build_request(PIN_PROTOCOL_V1, SUB_GET_KEY_AGREEMENT, &[]);
+///
+/// `protocol` MUST be the same pinUvAuthProtocol the following operation will
+/// use. Declaring v1 here while the operation runs v2 makes strict
+/// authenticators (YubiKey) reject the operation's `pinUvAuthParam` with
+/// `CTAP2_ERR_PIN_AUTH_INVALID` (0x33); lenient ones (Solo 2) tolerate the
+/// mismatch, which is why this only surfaced on the YubiKey. Confirmed from an
+/// on-wire trace: getKeyAgreement declared 1 while setPIN ran 2.
+pub fn get_key_agreement(
+    dev: &mut CtapHidDevice,
+    protocol: u32,
+) -> Result<([u8; 32], [u8; 32]), CtapError> {
+    let req = build_request(protocol, SUB_GET_KEY_AGREEMENT, &[]);
     let resp = dispatch(dev, &req)?;
     resp.key_agreement
         .ok_or(CtapError::InvalidResponseShape("missing keyAgreement"))
@@ -370,7 +380,7 @@ fn key_agreement(
     dev: &mut CtapHidDevice,
     chosen: SelectedPinProtocol,
 ) -> Result<(Box<dyn PinProtocol>, PeerKey), CtapError> {
-    let (peer_x, peer_y) = get_key_agreement(dev)?;
+    let (peer_x, peer_y) = get_key_agreement(dev, chosen.version())?;
     let our = EphemeralKey::generate();
     let (our_x, our_y) = our.public_xy();
     let proto: Box<dyn PinProtocol> = match chosen {
@@ -540,6 +550,20 @@ mod tests {
         assert_eq!(map[0].1.as_uint(), Some(1));
         assert_eq!(map[1].0.as_uint(), Some(KEY_SUB_COMMAND));
         assert_eq!(map[1].1.as_uint(), Some(SUB_GET_PIN_RETRIES as u64));
+    }
+
+    /// Regression (YubiKey 0x33): a getKeyAgreement built for a v2 flow must
+    /// declare protocol 2, not a hardcoded 1. Strict authenticators reject the
+    /// later pinUvAuthParam when the key agreement was negotiated under a
+    /// different protocol.
+    #[test]
+    fn get_key_agreement_request_declares_chosen_protocol() {
+        let bytes = build_request(PIN_PROTOCOL_V2, SUB_GET_KEY_AGREEMENT, &[]);
+        let (val, _) = cbor::decode(&bytes).unwrap();
+        let map = val.as_map().unwrap();
+        assert_eq!(map[0].0.as_uint(), Some(KEY_PIN_PROTOCOL));
+        assert_eq!(map[0].1.as_uint(), Some(PIN_PROTOCOL_V2 as u64));
+        assert_eq!(map[1].1.as_uint(), Some(SUB_GET_KEY_AGREEMENT as u64));
     }
 
     #[test]
