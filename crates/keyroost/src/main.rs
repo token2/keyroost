@@ -881,7 +881,18 @@ impl App {
                         }
                     }
                     match info {
-                        Some(Ok(info)) => app.security_keys.info = Some(info),
+                        Some(Ok(info)) => {
+                            // Refine the model from the AAGUID (e.g. "YubiKey" ->
+                            // "YubiKey 5 Series with NFC") on the selected device.
+                            if let Some(model) = ui::aaguid::model_for_aaguid(&info.aaguid) {
+                                if let Some(id) = app.selected_device.clone() {
+                                    if let Some(dev) = app.devices.iter_mut().find(|d| d.id == id) {
+                                        dev.model = model.to_string();
+                                    }
+                                }
+                            }
+                            app.security_keys.info = Some(info);
+                        }
                         Some(Err(e)) => {
                             app.security_keys.error = Some(format!("GetInfo failed: {}", e))
                         }
@@ -2807,6 +2818,16 @@ impl App {
                         }
                     }
                 });
+                if self.rename_open {
+                    ui.add_space(3.0);
+                    ui.label(
+                        egui::RichText::new(
+                            "Saves this key's serial with the name to keys.json on this computer \u{2014} nothing leaves your machine. Lowercase letters, digits, - and _.",
+                        )
+                        .font(theme::f_reg(11.5))
+                        .color(p.txt3),
+                    );
+                }
                 ui.add_space(2.0);
                 let serial = if dev.serial.is_empty() { "\u{2014}".to_string() } else { dev.serial.clone() };
                 let mut meta = format!("{} \u{00B7} #{} \u{00B7} {}", dev.vendor, serial, dev.transport);
