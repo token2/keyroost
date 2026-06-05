@@ -3458,7 +3458,7 @@ impl App {
         // Amber hero band.
         egui::Frame::none()
             .fill(p.brand_soft())
-            .inner_margin(egui::Margin::symmetric(26.0, 16.0))
+            .inner_margin(egui::Margin::symmetric(26.0, 12.0))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     glyph_tile(ui, 46.0, p.brand, p.accent_ink, None);
@@ -3631,9 +3631,12 @@ impl App {
                     ui.add_space(10.0);
                     ui.horizontal_top(|ui| {
                         ui.vertical(|ui| {
-                            ui.set_width(150.0);
+                            ui.set_width(140.0);
+                            // Fill the remaining height so the rail isn't a fixed
+                            // block jammed at the window bottom; leave a margin.
+                            let rail_h = (ui.available_height() - 48.0).max(160.0);
                             let mut pick = None;
-                            egui::ScrollArea::vertical().auto_shrink([false, false]).max_height(360.0).show(ui, |ui| {
+                            egui::ScrollArea::vertical().auto_shrink([false, false]).max_height(rail_h).show(ui, |ui| {
                                 for s in 0..PROFILES {
                                     let selected = s == self.slot;
                                     let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::click());
