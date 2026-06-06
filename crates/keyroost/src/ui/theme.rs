@@ -50,6 +50,20 @@ pub fn tint(c: Color32, a: u8) -> Color32 {
     Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a)
 }
 
+/// Blend `c` toward white by `t` (0..1). Used for button hover states.
+pub fn lighten(c: Color32, t: f32) -> Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let mix = |x: u8| (x as f32 + (255.0 - x as f32) * t).round() as u8;
+    Color32::from_rgb(mix(c.r()), mix(c.g()), mix(c.b()))
+}
+
+/// Blend `c` toward black by `t` (0..1). Used for button pressed states.
+pub fn darken(c: Color32, t: f32) -> Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let mix = |x: u8| (x as f32 * (1.0 - t)).round() as u8;
+    Color32::from_rgb(mix(c.r()), mix(c.g()), mix(c.b()))
+}
+
 impl Palette {
     pub fn new(mode: Mode, accent: Color32, colorblind: bool) -> Self {
         let mut p = match mode {
@@ -266,21 +280,65 @@ pub enum BtnKind {
     Danger,
 }
 
-/// A themed button. Returns the Response so callers handle `.clicked()`.
+/// A themed button. Painted by hand (rather than `egui::Button`) so every kind
+/// gets a visible hover lift, a pressed state, and a pointing-hand cursor —
+/// making it obvious the control is interactive. Returns the Response.
 pub fn button(ui: &mut egui::Ui, p: &Palette, kind: BtnKind, label: &str) -> Response {
-    let (fill, fg, stroke) = match kind {
+    let (base_fill, base_fg, base_stroke) = match kind {
         BtnKind::Primary => (p.accent, p.accent_ink, Stroke::NONE),
         BtnKind::Default => (p.raised2, p.txt, Stroke::new(1.0, p.line)),
         BtnKind::Ghost => (Color32::TRANSPARENT, p.txt2, Stroke::new(1.0, p.line)),
         BtnKind::Danger => (p.err, p.accent_ink, Stroke::NONE),
     };
-    ui.add(
-        egui::Button::new(egui::RichText::new(label).font(f_sb(13.0)).color(fg))
-            .fill(fill)
-            .stroke(stroke)
-            .rounding(Rounding::same(8.0))
-            .min_size(egui::vec2(0.0, 32.0)),
-    )
+
+    let font = f_sb(13.0);
+    let galley = ui.painter().layout_no_wrap(label.to_owned(), font, base_fg);
+    let pad_x = 14.0;
+    let size = egui::vec2(galley.size().x + pad_x * 2.0, 32.0);
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+
+    let pressed = resp.is_pointer_button_down_on();
+    let hovered = resp.hovered();
+    // Fill: darken on press, lift on hover. Ghost/Default gain a real surface on
+    // hover so they stop reading as plain text.
+    let fill = if pressed {
+        darken(
+            if matches!(kind, BtnKind::Ghost) {
+                p.raised2
+            } else {
+                base_fill
+            },
+            0.12,
+        )
+    } else if hovered {
+        match kind {
+            BtnKind::Ghost => p.raised2,
+            BtnKind::Default => lighten(base_fill, 0.10),
+            _ => lighten(base_fill, 0.08),
+        }
+    } else {
+        base_fill
+    };
+    // Outlined kinds pick up an accent border on hover; filled kinds keep theirs.
+    let stroke = if hovered && matches!(kind, BtnKind::Default | BtnKind::Ghost) {
+        Stroke::new(1.0, p.accent)
+    } else {
+        base_stroke
+    };
+    let fg = if hovered && matches!(kind, BtnKind::Ghost) {
+        p.txt
+    } else {
+        base_fg
+    };
+
+    let painter = ui.painter();
+    painter.rect(rect, Rounding::same(8.0), fill, stroke);
+    let galley = painter.layout_no_wrap(label.to_owned(), f_sb(13.0), fg);
+    painter.galley(rect.center() - galley.size() * 0.5, galley, fg);
+    if hovered {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    resp
 }
 
 /// Segmented control: a row of small buttons; returns the newly-clicked value.
@@ -302,12 +360,28 @@ pub fn segmented(
             } else {
                 (p.raised2, p.txt2, Stroke::new(1.0, p.line))
             };
+            let hover_fill = if on { fill } else { lighten(fill, 0.10) };
+            let hover_stroke = if on { stroke } else { Stroke::new(1.0, accent) };
             let r = ui.add(
                 egui::Button::new(egui::RichText::new(opt).font(f_sb(12.0)).color(fg))
                     .fill(fill)
                     .stroke(stroke)
                     .rounding(Rounding::same(7.0)),
             );
+            // Repaint the option's surface on hover so unselected segments read
+            // as clickable (egui's fixed `.fill()` otherwise has no hover state).
+            if r.hovered() {
+                ui.painter()
+                    .rect(r.rect, Rounding::same(7.0), hover_fill, hover_stroke);
+                ui.painter().text(
+                    r.rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    opt,
+                    f_sb(12.0),
+                    fg,
+                );
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
             if r.clicked() {
                 clicked = Some(opt.to_string());
             }

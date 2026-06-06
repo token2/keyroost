@@ -2620,6 +2620,9 @@ fn device_row(ui: &mut egui::Ui, p: &Palette, dev: &UiDevice, selected: bool) ->
             }
         }
     }
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
     resp.clicked()
 }
 
@@ -2708,6 +2711,9 @@ impl App {
     /// Toggle the help popover for `topic`, anchored under the clicked "?" button.
     fn help_dot(&mut self, ui: &mut egui::Ui, p: &Palette, topic: &'static str) {
         let r = ui::help_button(ui, p, self.help_open == Some(topic));
+        if r.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
         if r.clicked() {
             self.toggle_help(topic, r.rect.left_bottom());
         }
@@ -2763,6 +2769,7 @@ impl App {
                                 )
                                 .sense(egui::Sense::click()),
                             )
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
                             .clicked()
                         {
                             self.log_open = !self.log_open;
@@ -2778,7 +2785,11 @@ impl App {
                         let (trect, tresp) =
                             ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
                         paint_theme_icon(ui, trect.center(), 7.0, p.txt2);
-                        if tresp.on_hover_text("Toggle light / dark").clicked() {
+                        if tresp
+                            .on_hover_text("Toggle light / dark")
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .clicked()
+                        {
                             self.mode = match self.mode {
                                 Mode::Dark => Mode::Light,
                                 Mode::Light => Mode::Dark,
@@ -2792,7 +2803,11 @@ impl App {
                             erect.center(),
                             if self.colorblind { p.accent } else { p.txt2 },
                         );
-                        if eresp.on_hover_text("Colorblind-safe colors").clicked() {
+                        if eresp
+                            .on_hover_text("Colorblind-safe colors")
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .clicked()
+                        {
                             self.colorblind = !self.colorblind;
                         }
                         ui.add_space(10.0);
@@ -2811,6 +2826,9 @@ impl App {
                                     7.5,
                                     egui::Stroke::new(1.5, p.txt),
                                 );
+                            }
+                            if resp.hovered() {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                             }
                             if resp.clicked() {
                                 self.accent_idx = i;
@@ -2840,7 +2858,11 @@ impl App {
                         let (rrect, rresp) =
                             ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
                         paint_refresh_icon(ui, rrect.center(), 6.5, p.txt2);
-                        if rresp.on_hover_text("Rescan").clicked() {
+                        if rresp
+                            .on_hover_text("Rescan")
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .clicked()
+                        {
                             self.refresh_devices();
                         }
                     });
