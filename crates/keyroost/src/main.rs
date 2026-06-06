@@ -3461,10 +3461,10 @@ impl App {
         let mut open_rename = false;
         let mut do_save = false;
         let mut do_cancel = false;
-        // Amber hero band.
+        // Hero (no amber band — the orange comes from the clock glyph + accents,
+        // matching the security-key hero layout and avoiding a muddy brown tint).
         egui::Frame::none()
-            .fill(p.brand_soft())
-            .inner_margin(egui::Margin::symmetric(26.0, 12.0))
+            .inner_margin(egui::Margin::symmetric(26.0, 16.0))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     glyph_tile(ui, 46.0, p.brand, p.accent_ink, None);
