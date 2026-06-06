@@ -53,6 +53,24 @@ struct ResetDialog {
     confirm_input: String,
 }
 
+/// "Armed" reset: a FIDO authenticator only accepts a reset within ~10 s of
+/// being powered on, which the plug-then-navigate-then-confirm flow can never
+/// hit. So we confirm intent first, then watch for the user to unplug and
+/// replug the key and fire the reset the instant it reconnects. Polled in
+/// `update()` against the live FIDO HID list (no PC/SC, so it can't disturb
+/// other cards).
+struct ResetArm {
+    /// The armed key's HID path at arm time; its disappearance is what counts
+    /// as the "unplug" half of the dance (so bumping a *different* key doesn't
+    /// arm the trigger).
+    target_path: Option<std::path::PathBuf>,
+    /// FIDO HID paths present at the previous poll, to diff against.
+    prev_paths: Vec<std::path::PathBuf>,
+    /// True once the armed key has been unplugged; the next fresh insertion then
+    /// fires the reset.
+    saw_removal: bool,
+}
+
 struct UnlockedSession {
     token: PinUvAuthToken,
     metadata: CredsMetadata,
@@ -362,6 +380,9 @@ struct App {
     /// Set by the reader watcher on a PC/SC hotplug; consumed in `update()` to
     /// trigger a re-enumeration. Shared with the watcher thread.
     devices_dirty: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// While `Some`, a FIDO reset is armed and waiting for the key to be
+    /// unplugged and plugged back in (see [`ResetArm`]).
+    reset_arm: Option<ResetArm>,
     /// Background PC/SC hotplug watcher. `None` in tests / if it can't start.
     /// Held only to keep the thread alive; dropped on app exit.
     #[allow(dead_code)]
@@ -1145,10 +1166,10 @@ impl App {
     /// Wipe the selected key (authenticatorReset). Runs on the worker thread —
     /// the card needs a touch within ~30s, which the worker keeps off the UI
     /// frame. On success the cached session and CTAP info are cleared.
-    fn submit_reset(&mut self) {
-        let Some(path) = self.selected_fido_path() else {
-            return;
-        };
+    /// Wipe the FIDO key at `path` (authenticatorReset). Used by the armed-reset
+    /// flow, which targets the just-reconnected key rather than the (now stale)
+    /// selection.
+    fn submit_reset_path(&mut self, path: std::path::PathBuf) {
         self.spawn_job("Resetting key\u{2026} (touch now)", move || {
             let result = (|| -> Result<(), String> {
                 let (mut dev, _) = CtapHidDevice::open(&path).map_err(|e| e.to_string())?;
@@ -1414,8 +1435,9 @@ impl App {
             .unwrap_or_else(|| "this key".into());
 
         let mut window_open = true;
-        let mut do_reset = false;
+        let mut arm = false;
         let mut cancel = false;
+        let waiting = self.reset_arm.is_some();
         egui::Window::new("Reset security key?")
             .collapsible(false)
             .resizable(false)
@@ -1426,36 +1448,105 @@ impl App {
                     egui::Color32::from_rgb(220, 110, 110),
                     format!("This wipes ALL credentials and the PIN on {label}."),
                 );
-                ui.label("This cannot be undone. The key must be freshly plugged in,");
-                ui.label("and you'll need to touch it within ~30 seconds.");
+                ui.label("This cannot be undone.");
                 ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.label("Type \u{201c}reset\u{201d} to confirm:");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.security_keys.reset.confirm_input)
-                            .desired_width(120.0),
-                    );
-                });
-                ui.add_space(6.0);
-                let armed = self.security_keys.reset.confirm_input.trim() == "reset";
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(armed, egui::Button::new("Reset key"))
-                        .clicked()
-                    {
-                        do_reset = true;
-                    }
+                if waiting {
+                    // Armed: the clock starts when the key is re-inserted, so we
+                    // wait for the unplug/replug and fire the moment it returns.
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(
+                            egui::RichText::new("Now unplug the key, then plug it back in.")
+                                .strong(),
+                        );
+                    });
+                    ui.label("The reset is sent the instant it reconnects \u{2014} then the");
+                    ui.label("key will blink. Touch it to finish the wipe.");
+                    ui.add_space(6.0);
                     if ui.button("Cancel").clicked() {
                         cancel = true;
                     }
-                });
+                } else {
+                    ui.label("A key only accepts a reset within ~10 seconds of being");
+                    ui.label("plugged in, so after you confirm you'll re-insert it.");
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Type \u{201c}reset\u{201d} to confirm:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.security_keys.reset.confirm_input)
+                                .desired_width(120.0),
+                        );
+                    });
+                    ui.add_space(6.0);
+                    let ready = self.security_keys.reset.confirm_input.trim() == "reset";
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(ready, egui::Button::new("Arm reset"))
+                            .clicked()
+                        {
+                            arm = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            cancel = true;
+                        }
+                    });
+                }
             });
-        if do_reset {
-            self.security_keys.reset = ResetDialog::default();
-            self.submit_reset();
+        if arm {
+            // Snapshot the current FIDO keys so the poll can tell when ours
+            // leaves and a fresh one arrives.
+            let prev_paths = Self::fido_paths();
+            self.reset_arm = Some(ResetArm {
+                target_path: self.selected_fido_path(),
+                prev_paths,
+                saw_removal: false,
+            });
         } else if cancel || !window_open {
             // Cancel button, or the window's [x] close.
             self.security_keys.reset = ResetDialog::default();
+            self.reset_arm = None;
+        }
+    }
+
+    /// Current FIDO HID device paths (cheap sysfs read, no PC/SC).
+    fn fido_paths() -> Vec<std::path::PathBuf> {
+        keyroost_hid::enumerate()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(HidDevice::is_fido)
+            .map(|h| h.path)
+            .collect()
+    }
+
+    /// Poll the live FIDO list while a reset is armed: once the armed key has
+    /// been unplugged, fire the reset on the next freshly-inserted key (which is
+    /// the user re-plugging it), inside the ~10 s window.
+    fn poll_reset_arm(&mut self) {
+        let current = Self::fido_paths();
+        let mut fire: Option<std::path::PathBuf> = None;
+        if let Some(arm) = self.reset_arm.as_mut() {
+            // The armed key leaving is the "unplug" half of the dance.
+            if let Some(target) = &arm.target_path {
+                if !current.contains(target) {
+                    arm.saw_removal = true;
+                }
+            } else if arm.prev_paths.iter().any(|p| !current.contains(p)) {
+                arm.saw_removal = true;
+            }
+            // A path present now but not last poll is a fresh insertion.
+            if arm.saw_removal {
+                fire = current
+                    .iter()
+                    .find(|p| !arm.prev_paths.contains(p))
+                    .cloned();
+            }
+            arm.prev_paths = current;
+        }
+        if let Some(path) = fire {
+            self.reset_arm = None;
+            self.security_keys.reset = ResetDialog::default();
+            self.submit_reset_path(path);
         }
     }
 
@@ -2656,11 +2747,22 @@ impl eframe::App for App {
             self.refresh_devices();
         }
 
+        // Armed FIDO reset: poll the live key list so we can fire the reset the
+        // instant the user re-inserts the key. Runs before the hotplug refresh
+        // and holds the worker slot, so a replug-triggered rescan can't beat the
+        // reset to it.
+        if self.reset_arm.is_some() {
+            self.poll_reset_arm();
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        }
+
         // Reader hotplug: the watcher set this flag (and woke us). Re-enumerate,
         // but only when idle — if a job is in flight we leave the flag set and
         // pick it up after the job finishes (the worker requests a repaint),
-        // rather than dropping the rescan against the busy guard.
-        if !self.busy()
+        // rather than dropping the rescan against the busy guard. Suppressed
+        // while a reset is armed so the rescan job can't steal the worker slot.
+        if self.reset_arm.is_none()
+            && !self.busy()
             && self
                 .devices_dirty
                 .swap(false, std::sync::atomic::Ordering::Relaxed)
