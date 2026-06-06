@@ -877,7 +877,10 @@ impl App {
             Box::new(move |app: &mut App| match outcome {
                 Ok((init, info)) => {
                     // Surface the key's firmware on the hero (e.g. "fw 5.7.4").
-                    let fw = format!("{}.{}.{}", init.device_major, init.device_minor, init.device_build);
+                    let fw = format!(
+                        "{}.{}.{}",
+                        init.device_major, init.device_minor, init.device_build
+                    );
                     app.security_keys.init = Some(init);
                     if let Some(id) = app.selected_device.clone() {
                         if let Some(dev) = app.devices.iter_mut().find(|d| d.id == id) {
@@ -1185,10 +1188,7 @@ impl App {
                 .calculate_totp(&c.name, now, 30)
                 .ok()
                 .map(|otp| otp.code);
-            rows.push(OathRow {
-                name: c.name,
-                code,
-            });
+            rows.push(OathRow { name: c.name, code });
         }
         Ok(rows)
     }
@@ -1989,7 +1989,11 @@ fn unix_now() -> u32 {
 impl App {
     /// The palette for the current theme + accent.
     fn palette(&self) -> Palette {
-        Palette::new(self.mode, Palette::ACCENTS[self.accent_idx], self.colorblind)
+        Palette::new(
+            self.mode,
+            Palette::ACCENTS[self.accent_idx],
+            self.colorblind,
+        )
     }
 
     /// The currently selected device, if the id still resolves to a present one.
@@ -2131,6 +2135,24 @@ impl App {
         });
     }
 
+    /// Apply the three rename-dialog actions shared by the security-key hero and
+    /// the Molto2 hero: open the inline field, cancel it, or commit the name.
+    /// The flags are collected during the `ui` closures (where `self` is already
+    /// borrowed) and applied here afterwards.
+    fn apply_rename_actions(&mut self, dev: &UiDevice, open: bool, cancel: bool, save: bool) {
+        if open {
+            self.rename_open = true;
+            self.rename_input = dev.name.clone().unwrap_or_default();
+        }
+        if cancel {
+            self.rename_open = false;
+            self.rename_input.clear();
+        }
+        if save {
+            self.save_device_name();
+        }
+    }
+
     /// Persist (or clear) the selected device's friendly name in `keys.json`,
     /// keyed by its serial. Empty input removes the existing name.
     fn save_device_name(&mut self) {
@@ -2138,7 +2160,10 @@ impl App {
             return;
         };
         if dev.serial.is_empty() {
-            self.log(Severity::Warn, "this device exposes no serial, so it can't be named yet");
+            self.log(
+                Severity::Warn,
+                "this device exposes no serial, so it can't be named yet",
+            );
             self.rename_open = false;
             return;
         }
@@ -2205,7 +2230,13 @@ fn panel_frame(fill: egui::Color32, mx: f32, my: f32) -> egui::Frame {
 
 /// A rounded square "glyph tile". `ch = Some(c)` paints a letter; `None` paints a
 /// small clock (the Molto2 token mark).
-fn glyph_tile(ui: &mut egui::Ui, size: f32, fill: egui::Color32, fg: egui::Color32, ch: Option<char>) {
+fn glyph_tile(
+    ui: &mut egui::Ui,
+    size: f32,
+    fill: egui::Color32,
+    fg: egui::Color32,
+    ch: Option<char>,
+) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
     ui.painter()
         .rect_filled(rect, egui::Rounding::same(size * 0.28), fill);
@@ -2223,10 +2254,14 @@ fn glyph_tile(ui: &mut egui::Ui, size: f32, fill: egui::Color32, fg: egui::Color
             let c = rect.center();
             let r = size * 0.26;
             ui.painter().circle_stroke(c, r, egui::Stroke::new(1.6, fg));
-            ui.painter()
-                .line_segment([c, c + egui::vec2(0.0, -r * 0.72)], egui::Stroke::new(1.6, fg));
-            ui.painter()
-                .line_segment([c, c + egui::vec2(r * 0.55, 0.0)], egui::Stroke::new(1.6, fg));
+            ui.painter().line_segment(
+                [c, c + egui::vec2(0.0, -r * 0.72)],
+                egui::Stroke::new(1.6, fg),
+            );
+            ui.painter().line_segment(
+                [c, c + egui::vec2(r * 0.55, 0.0)],
+                egui::Stroke::new(1.6, fg),
+            );
         }
     }
 }
@@ -2258,40 +2293,74 @@ fn pin_field(ui: &mut egui::Ui, p: &Palette, label: &str, buf: &mut String) {
     ui.horizontal(|ui| {
         ui.add_sized(
             [96.0, 22.0],
-            egui::Label::new(egui::RichText::new(label).font(theme::f_reg(13.0)).color(p.txt2)),
+            egui::Label::new(
+                egui::RichText::new(label)
+                    .font(theme::f_reg(13.0))
+                    .color(p.txt2),
+            ),
         );
-        ui.add(egui::TextEdit::singleline(buf).password(true).desired_width(200.0));
+        ui.add(
+            egui::TextEdit::singleline(buf)
+                .password(true)
+                .desired_width(200.0),
+        );
     });
     ui.add_space(4.0);
 }
 
 /// Paint a rounded glyph tile at `rect` with the painter (no widget allocation,
 /// so it never steals clicks from a surrounding row). `ch = None` draws a clock.
-fn paint_glyph_tile(ui: &egui::Ui, rect: egui::Rect, fill: egui::Color32, fg: egui::Color32, ch: Option<char>) {
-    ui.painter().rect_filled(rect, egui::Rounding::same(rect.width() * 0.28), fill);
+fn paint_glyph_tile(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    fill: egui::Color32,
+    fg: egui::Color32,
+    ch: Option<char>,
+) {
+    ui.painter()
+        .rect_filled(rect, egui::Rounding::same(rect.width() * 0.28), fill);
     match ch {
         Some(c) => {
-            ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, c, theme::f_bold(rect.width() * 0.5), fg);
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                c,
+                theme::f_bold(rect.width() * 0.5),
+                fg,
+            );
         }
         None => {
             let c = rect.center();
             let r = rect.width() * 0.26;
             ui.painter().circle_stroke(c, r, egui::Stroke::new(1.6, fg));
-            ui.painter().line_segment([c, c + egui::vec2(0.0, -r * 0.72)], egui::Stroke::new(1.6, fg));
-            ui.painter().line_segment([c, c + egui::vec2(r * 0.55, 0.0)], egui::Stroke::new(1.6, fg));
+            ui.painter().line_segment(
+                [c, c + egui::vec2(0.0, -r * 0.72)],
+                egui::Stroke::new(1.6, fg),
+            );
+            ui.painter().line_segment(
+                [c, c + egui::vec2(r * 0.55, 0.0)],
+                egui::Stroke::new(1.6, fg),
+            );
         }
     }
 }
 
 /// Paint a small rounded pill at `left_top` with the painter; returns its width
 /// so the caller can advance a cursor.
-fn paint_pill(ui: &egui::Ui, left_top: egui::Pos2, text: &str, fg: egui::Color32, bg: egui::Color32) -> f32 {
+fn paint_pill(
+    ui: &egui::Ui,
+    left_top: egui::Pos2,
+    text: &str,
+    fg: egui::Color32,
+    bg: egui::Color32,
+) -> f32 {
     let galley = ui.fonts(|f| f.layout_no_wrap(text.to_string(), theme::f_sb(11.0), fg));
     let pad_x = 8.0;
     let h = 18.0;
     let w = galley.size().x + pad_x * 2.0;
     let rect = egui::Rect::from_min_size(left_top, egui::vec2(w, h));
-    ui.painter().rect_filled(rect, egui::Rounding::same(999.0), bg);
+    ui.painter()
+        .rect_filled(rect, egui::Rounding::same(999.0), bg);
     let pos = egui::pos2(left_top.x + pad_x, rect.center().y - galley.size().y / 2.0);
     ui.painter().galley(pos, galley, fg);
     w
@@ -2303,7 +2372,8 @@ fn paint_pill(ui: &egui::Ui, left_top: egui::Pos2, text: &str, fg: egui::Color32
 /// Half-filled circle — the light/dark theme toggle.
 fn paint_theme_icon(ui: &egui::Ui, center: egui::Pos2, r: f32, color: egui::Color32) {
     use std::f32::consts::{FRAC_PI_2, PI};
-    ui.painter().circle_stroke(center, r, egui::Stroke::new(1.3, color));
+    ui.painter()
+        .circle_stroke(center, r, egui::Stroke::new(1.3, color));
     let n = 20;
     let pts: Vec<egui::Pos2> = (0..=n)
         .map(|i| {
@@ -2311,7 +2381,8 @@ fn paint_theme_icon(ui: &egui::Ui, center: egui::Pos2, r: f32, color: egui::Colo
             center + r * egui::vec2(a.cos(), a.sin())
         })
         .collect();
-    ui.painter().add(egui::Shape::convex_polygon(pts, color, egui::Stroke::NONE));
+    ui.painter()
+        .add(egui::Shape::convex_polygon(pts, color, egui::Stroke::NONE));
 }
 
 /// An eye (two lids + a pupil) — the colorblind-mode toggle.
@@ -2352,8 +2423,11 @@ fn paint_refresh_icon(ui: &egui::Ui, center: egui::Pos2, r: f32, color: egui::Co
     let tip = end + tangent * 3.5;
     let b1 = end + radial * 2.6 - tangent * 0.8;
     let b2 = end - radial * 2.6 - tangent * 0.8;
-    ui.painter()
-        .add(egui::Shape::convex_polygon(vec![tip, b1, b2], color, egui::Stroke::NONE));
+    ui.painter().add(egui::Shape::convex_polygon(
+        vec![tip, b1, b2],
+        color,
+        egui::Stroke::NONE,
+    ));
 }
 
 /// Two stacked sheets — copy.
@@ -2362,21 +2436,46 @@ fn paint_copy_icon(ui: &egui::Ui, center: egui::Pos2, color: egui::Color32) {
     let back = egui::Rect::from_min_size(center + egui::vec2(-1.0, -5.0), egui::vec2(7.0, 8.0));
     let front = egui::Rect::from_min_size(center + egui::vec2(-5.0, -1.0), egui::vec2(7.0, 8.0));
     ui.painter().rect_stroke(back, egui::Rounding::same(1.5), s);
-    ui.painter().rect_stroke(front, egui::Rounding::same(1.5), s);
+    ui.painter()
+        .rect_stroke(front, egui::Rounding::same(1.5), s);
 }
 
 /// Checkmark — copied / confirmed.
 fn paint_check_icon(ui: &egui::Ui, center: egui::Pos2, color: egui::Color32) {
     let s = egui::Stroke::new(1.7, color);
-    ui.painter().line_segment([center + egui::vec2(-4.0, 0.0), center + egui::vec2(-1.0, 3.0)], s);
-    ui.painter().line_segment([center + egui::vec2(-1.0, 3.0), center + egui::vec2(4.0, -3.5)], s);
+    ui.painter().line_segment(
+        [
+            center + egui::vec2(-4.0, 0.0),
+            center + egui::vec2(-1.0, 3.0),
+        ],
+        s,
+    );
+    ui.painter().line_segment(
+        [
+            center + egui::vec2(-1.0, 3.0),
+            center + egui::vec2(4.0, -3.5),
+        ],
+        s,
+    );
 }
 
 /// Cross — delete / dismiss.
 fn paint_x_icon(ui: &egui::Ui, center: egui::Pos2, color: egui::Color32) {
     let s = egui::Stroke::new(1.4, color);
-    ui.painter().line_segment([center + egui::vec2(-3.5, -3.5), center + egui::vec2(3.5, 3.5)], s);
-    ui.painter().line_segment([center + egui::vec2(-3.5, 3.5), center + egui::vec2(3.5, -3.5)], s);
+    ui.painter().line_segment(
+        [
+            center + egui::vec2(-3.5, -3.5),
+            center + egui::vec2(3.5, 3.5),
+        ],
+        s,
+    );
+    ui.painter().line_segment(
+        [
+            center + egui::vec2(-3.5, 3.5),
+            center + egui::vec2(3.5, -3.5),
+        ],
+        s,
+    );
 }
 
 /// Paint one selectable device row. The whole row is a single painter-drawn
@@ -2397,36 +2496,75 @@ fn device_row(ui: &mut egui::Ui, p: &Palette, dev: &UiDevice, selected: bool) ->
         rect,
         egui::Rounding::same(11.0),
         bg,
-        egui::Stroke::new(1.0, if selected { p.line } else { egui::Color32::TRANSPARENT }),
+        egui::Stroke::new(
+            1.0,
+            if selected {
+                p.line
+            } else {
+                egui::Color32::TRANSPARENT
+            },
+        ),
     );
     if selected {
         ui.painter().rect_filled(
-            egui::Rect::from_min_size(rect.left_top() + egui::vec2(0.0, 13.0), egui::vec2(3.0, h - 26.0)),
+            egui::Rect::from_min_size(
+                rect.left_top() + egui::vec2(0.0, 13.0),
+                egui::vec2(3.0, h - 26.0),
+            ),
             egui::Rounding::same(3.0),
             p.accent,
         );
     }
 
     let token = dev.kind == DeviceKind::Token;
-    let tile = egui::Rect::from_min_size(rect.left_top() + egui::vec2(14.0, (h - 38.0) / 2.0), egui::vec2(38.0, 38.0));
+    let tile = egui::Rect::from_min_size(
+        rect.left_top() + egui::vec2(14.0, (h - 38.0) / 2.0),
+        egui::vec2(38.0, 38.0),
+    );
     if token {
         paint_glyph_tile(ui, tile, p.brand_soft(), p.brand, None);
     } else {
-        paint_glyph_tile(ui, tile, p.raised2, p.txt2, Some(dev.vendor.chars().next().unwrap_or('?').to_ascii_uppercase()));
+        paint_glyph_tile(
+            ui,
+            tile,
+            p.raised2,
+            p.txt2,
+            Some(
+                dev.vendor
+                    .chars()
+                    .next()
+                    .unwrap_or('?')
+                    .to_ascii_uppercase(),
+            ),
+        );
     }
 
     let tx = tile.right() + 11.0;
     let right_pad = 16.0;
     // status dot, top-right
-    ui.painter().circle_filled(egui::pos2(rect.right() - right_pad, rect.top() + 18.0), 3.5, p.ok);
+    ui.painter().circle_filled(
+        egui::pos2(rect.right() - right_pad, rect.top() + 18.0),
+        3.5,
+        p.ok,
+    );
     // vendor eyebrow
-    ui.painter().text(egui::pos2(tx, rect.top() + 13.0), egui::Align2::LEFT_TOP, &dev.vendor, theme::f_sb(11.0), p.txt3);
+    ui.painter().text(
+        egui::pos2(tx, rect.top() + 13.0),
+        egui::Align2::LEFT_TOP,
+        &dev.vendor,
+        theme::f_sb(11.0),
+        p.txt3,
+    );
     // model, truncated to the available width
     let avail = (rect.right() - right_pad - 8.0) - tx;
     let galley = ui.fonts(|f| {
         let mut job = egui::text::LayoutJob::single_section(
             dev.title().to_string(),
-            egui::TextFormat { font_id: theme::f_sb(13.5), color: p.txt, ..Default::default() },
+            egui::TextFormat {
+                font_id: theme::f_sb(13.5),
+                color: p.txt,
+                ..Default::default()
+            },
         );
         job.wrap = egui::text::TextWrapping {
             max_width: avail.max(0.0),
@@ -2436,11 +2574,18 @@ fn device_row(ui: &mut egui::Ui, p: &Palette, dev: &UiDevice, selected: bool) ->
         };
         f.layout_job(job)
     });
-    ui.painter().galley(egui::pos2(tx, rect.top() + 26.0), galley, p.txt);
+    ui.painter()
+        .galley(egui::pos2(tx, rect.top() + 26.0), galley, p.txt);
     // capability pills
     let py = rect.top() + 46.0;
     if token {
-        paint_pill(ui, egui::pos2(tx, py), "TOTP token", p.brand, p.brand_soft());
+        paint_pill(
+            ui,
+            egui::pos2(tx, py),
+            "TOTP token",
+            p.brand,
+            p.brand_soft(),
+        );
     } else {
         let mut px = tx;
         for (cap, label) in [
@@ -2469,7 +2614,10 @@ impl eframe::App for App {
             .to_string(),
         );
         storage.set_string("accent", self.accent_idx.to_string());
-        storage.set_string("colorblind", if self.colorblind { "1" } else { "0" }.to_string());
+        storage.set_string(
+            "colorblind",
+            if self.colorblind { "1" } else { "0" }.to_string(),
+        );
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -2510,8 +2658,12 @@ impl eframe::App for App {
         // pane, which would burn frames and feel sluggish.
         let animating = self.copied.is_some()
             || matches!(self.cap_tab, CapTab::Oath)
-            || (matches!(self.cap_tab, CapTab::Overview) && self.oath.loaded && !self.oath.creds.is_empty())
-            || self.selected_device().map_or(false, |d| d.kind == DeviceKind::Token);
+            || (matches!(self.cap_tab, CapTab::Overview)
+                && self.oath.loaded
+                && !self.oath.creds.is_empty())
+            || self
+                .selected_device()
+                .is_some_and(|d| d.kind == DeviceKind::Token);
         if animating {
             ctx.request_repaint_after(std::time::Duration::from_millis(500));
         }
@@ -2538,7 +2690,11 @@ impl App {
                 ui.horizontal_centered(|ui| {
                     glyph_tile(ui, 26.0, p.brand, p.accent_ink, Some('k'));
                     ui.add_space(8.0);
-                    ui.label(egui::RichText::new("keyroost").font(theme::f_bold(14.0)).color(p.txt));
+                    ui.label(
+                        egui::RichText::new("keyroost")
+                            .font(theme::f_bold(14.0))
+                            .color(p.txt),
+                    );
                     ui.add_space(12.0);
                     theme::status_dot(ui, p.ok, 7.0);
                     ui.add_space(5.0);
@@ -2551,7 +2707,11 @@ impl App {
                         ui.add_space(12.0);
                         ui.spinner();
                         if let Some(label) = &self.busy_label {
-                            ui.label(egui::RichText::new(label.as_str()).font(theme::f_reg(12.0)).color(p.txt3));
+                            ui.label(
+                                egui::RichText::new(label.as_str())
+                                    .font(theme::f_reg(12.0))
+                                    .color(p.txt3),
+                            );
                         }
                     }
 
@@ -2564,7 +2724,9 @@ impl App {
                         if ui
                             .add(
                                 egui::Label::new(
-                                    egui::RichText::new("Activity log").font(theme::f_sb(12.5)).color(log_color),
+                                    egui::RichText::new("Activity log")
+                                        .font(theme::f_sb(12.5))
+                                        .color(log_color),
                                 )
                                 .sense(egui::Sense::click()),
                             )
@@ -2574,7 +2736,9 @@ impl App {
                         }
                         ui.add_space(10.0);
                         ui.hyperlink_to(
-                            egui::RichText::new("Learn \u{2197}").font(theme::f_sb(12.5)).color(p.txt2),
+                            egui::RichText::new("Learn \u{2197}")
+                                .font(theme::f_sb(12.5))
+                                .color(p.txt2),
                             ui::help::LEARN_BASE,
                         );
                         ui.add_space(10.0);
@@ -2590,20 +2754,30 @@ impl App {
                         ui.add_space(10.0);
                         let (erect, eresp) =
                             ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
-                        paint_eye_icon(ui, erect.center(), if self.colorblind { p.accent } else { p.txt2 });
+                        paint_eye_icon(
+                            ui,
+                            erect.center(),
+                            if self.colorblind { p.accent } else { p.txt2 },
+                        );
                         if eresp.on_hover_text("Colorblind-safe colors").clicked() {
                             self.colorblind = !self.colorblind;
                         }
                         ui.add_space(10.0);
                         for (i, c) in Palette::ACCENTS.iter().enumerate().rev() {
-                            let (rect, resp) =
-                                ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click());
+                            let (rect, resp) = ui
+                                .allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click());
                             let on = i == self.accent_idx;
-                            ui.painter()
-                                .circle_filled(rect.center(), if on { 6.0 } else { 5.0 }, *c);
+                            ui.painter().circle_filled(
+                                rect.center(),
+                                if on { 6.0 } else { 5.0 },
+                                *c,
+                            );
                             if on {
-                                ui.painter()
-                                    .circle_stroke(rect.center(), 7.5, egui::Stroke::new(1.5, p.txt));
+                                ui.painter().circle_stroke(
+                                    rect.center(),
+                                    7.5,
+                                    egui::Stroke::new(1.5, p.txt),
+                                );
                             }
                             if resp.clicked() {
                                 self.accent_idx = i;
@@ -2622,7 +2796,11 @@ impl App {
             .frame(panel_frame(p.side, 14.0, 12.0))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("DEVICES").font(theme::f_bold(11.0)).color(p.txt3));
+                    ui.label(
+                        egui::RichText::new("DEVICES")
+                            .font(theme::f_bold(11.0))
+                            .color(p.txt3),
+                    );
                     ui.add_space(6.0);
                     theme::pill(ui, &self.devices.len().to_string(), p.txt2, p.raised2);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2648,21 +2826,31 @@ impl App {
                 }
 
                 let mut clicked: Option<DeviceId> = None;
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    if self.devices.is_empty() {
-                        ui.add_space(12.0);
-                        ui.vertical_centered(|ui| {
-                            ui.label(egui::RichText::new("No keys detected yet.").font(theme::f_reg(13.0)).color(p.txt3));
-                        });
-                    }
-                    for dev in self.devices.iter().filter(|d| matches_filter(d, &self.filter)) {
-                        let selected = self.selected_device.as_deref() == Some(dev.id.as_str());
-                        if device_row(ui, p, dev, selected) {
-                            clicked = Some(dev.id.clone());
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        if self.devices.is_empty() {
+                            ui.add_space(12.0);
+                            ui.vertical_centered(|ui| {
+                                ui.label(
+                                    egui::RichText::new("No keys detected yet.")
+                                        .font(theme::f_reg(13.0))
+                                        .color(p.txt3),
+                                );
+                            });
                         }
-                        ui.add_space(2.0);
-                    }
-                });
+                        for dev in self
+                            .devices
+                            .iter()
+                            .filter(|d| matches_filter(d, &self.filter))
+                        {
+                            let selected = self.selected_device.as_deref() == Some(dev.id.as_str());
+                            if device_row(ui, p, dev, selected) {
+                                clicked = Some(dev.id.clone());
+                            }
+                            ui.add_space(2.0);
+                        }
+                    });
                 if let Some(id) = clicked {
                     self.select_device(id);
                 }
@@ -2673,9 +2861,15 @@ impl App {
                         ui.add_space(4.0);
                         ui.horizontal_wrapped(|ui| {
                             ui.spacing_mut().item_spacing.x = 4.0;
-                            ui.label(egui::RichText::new("Several keys plugged in?").font(theme::f_reg(12.0)).color(p.txt3));
+                            ui.label(
+                                egui::RichText::new("Several keys plugged in?")
+                                    .font(theme::f_reg(12.0))
+                                    .color(p.txt3),
+                            );
                             ui.hyperlink_to(
-                                egui::RichText::new("Give them names").font(theme::f_sb(12.0)).color(p.accent),
+                                egui::RichText::new("Give them names")
+                                    .font(theme::f_sb(12.0))
+                                    .color(p.accent),
                                 ui::help::learn_url("/naming"),
                             );
                         });
@@ -2691,7 +2885,11 @@ impl App {
             .frame(panel_frame(p.bar, 16.0, 10.0))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("ACTIVITY LOG").font(theme::f_bold(11.0)).color(p.txt3));
+                    ui.label(
+                        egui::RichText::new("ACTIVITY LOG")
+                            .font(theme::f_bold(11.0))
+                            .color(p.txt3),
+                    );
                     ui.add_space(6.0);
                     theme::pill(ui, "live", p.ok, p.ok_soft());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2700,7 +2898,12 @@ impl App {
                         }
                         ui.add_space(4.0);
                         if theme::button(ui, p, BtnKind::Ghost, "Copy").clicked() {
-                            let all = self.log.iter().map(|l| l.text.clone()).collect::<Vec<_>>().join("\n");
+                            let all = self
+                                .log
+                                .iter()
+                                .map(|l| l.text.clone())
+                                .collect::<Vec<_>>()
+                                .join("\n");
                             ui.output_mut(|o| o.copied_text = all);
                         }
                     });
@@ -2717,7 +2920,11 @@ impl App {
                                 Severity::Err => p.err,
                                 Severity::Info => p.txt2,
                             };
-                            ui.label(egui::RichText::new(&line.text).font(theme::f_mono(12.0)).color(color));
+                            ui.label(
+                                egui::RichText::new(&line.text)
+                                    .font(theme::f_mono(12.0))
+                                    .color(color),
+                            );
                         }
                     });
             });
@@ -2892,20 +3099,11 @@ impl App {
                 theme::status_dot(ui, p.ok, 8.0);
             });
         });
-        if open_rename {
-            self.rename_open = true;
-            self.rename_input = dev.name.clone().unwrap_or_default();
-        }
-        if do_cancel {
-            self.rename_open = false;
-            self.rename_input.clear();
-        }
-        if do_save {
-            self.save_device_name();
-        }
+        self.apply_rename_actions(dev, open_rename, do_cancel, do_save);
         ui.add_space(14.0);
         let y = ui.cursor().top();
-        ui.painter().hline(ui.max_rect().x_range(), y, egui::Stroke::new(1.0, p.line));
+        ui.painter()
+            .hline(ui.max_rect().x_range(), y, egui::Stroke::new(1.0, p.line));
     }
 
     /// Capability tab bar under the hero. The active tab gets `txt` + an accent
@@ -2919,13 +3117,20 @@ impl App {
                 let active = self.cap_tab == t;
                 let color = if active { p.txt } else { p.txt3 };
                 let resp = ui.add(
-                    egui::Label::new(egui::RichText::new(cap_tab_label(t)).font(theme::f_sb(13.5)).color(color))
-                        .sense(egui::Sense::click()),
+                    egui::Label::new(
+                        egui::RichText::new(cap_tab_label(t))
+                            .font(theme::f_sb(13.5))
+                            .color(color),
+                    )
+                    .sense(egui::Sense::click()),
                 );
                 if active {
                     let y = resp.rect.bottom() + 6.0;
                     ui.painter().line_segment(
-                        [egui::pos2(resp.rect.left(), y), egui::pos2(resp.rect.right(), y)],
+                        [
+                            egui::pos2(resp.rect.left(), y),
+                            egui::pos2(resp.rect.right(), y),
+                        ],
                         egui::Stroke::new(2.0, p.accent),
                     );
                 }
@@ -2941,17 +3146,31 @@ impl App {
 
     /// A card header row: title · "?" help · right-aligned "Manage →". Returns
     /// true when Manage is clicked (caller switches `cap_tab`).
-    fn card_head(&mut self, ui: &mut egui::Ui, p: &Palette, title: &str, topic: &'static str) -> bool {
+    fn card_head(
+        &mut self,
+        ui: &mut egui::Ui,
+        p: &Palette,
+        title: &str,
+        topic: &'static str,
+    ) -> bool {
         let mut go = false;
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(title).font(theme::f_sb(14.5)).color(p.txt));
+            ui.label(
+                egui::RichText::new(title)
+                    .font(theme::f_sb(14.5))
+                    .color(p.txt),
+            );
             ui.add_space(6.0);
             self.help_dot(ui, p, topic);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .add(
-                        egui::Label::new(egui::RichText::new("Manage \u{2192}").font(theme::f_sb(12.5)).color(p.accent))
-                            .sense(egui::Sense::click()),
+                        egui::Label::new(
+                            egui::RichText::new("Manage \u{2192}")
+                                .font(theme::f_sb(12.5))
+                                .color(p.accent),
+                        )
+                        .sense(egui::Sense::click()),
                     )
                     .clicked()
                 {
@@ -2964,120 +3183,179 @@ impl App {
 
     /// Overview tab: one summary card per capability, each with a `Manage →` jump.
     fn overview(&mut self, ui: &mut egui::Ui, p: &Palette, dev: &UiDevice) {
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            if dev.caps.has(Caps::FIDO2) {
-                theme::card_frame(p).show(ui, |ui| {
-                    if self.card_head(ui, p, "Passkeys & sign-in (FIDO2)", "fido2") {
-                        self.cap_tab = CapTab::Fido2;
-                    }
-                    ui.add_space(8.0);
-                    match self.security_keys.info.as_ref().and_then(|i| i.option("clientPin")) {
-                        Some(true) => {
-                            ui.horizontal(|ui| {
-                                theme::pill(ui, "PIN set", p.ok, p.ok_soft());
-                                ui.add_space(8.0);
-                                ui.label(
-                                    egui::RichText::new("PIN configured \u{00B7} ready for passkeys")
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if dev.caps.has(Caps::FIDO2) {
+                    theme::card_frame(p).show(ui, |ui| {
+                        if self.card_head(ui, p, "Passkeys & sign-in (FIDO2)", "fido2") {
+                            self.cap_tab = CapTab::Fido2;
+                        }
+                        ui.add_space(8.0);
+                        match self
+                            .security_keys
+                            .info
+                            .as_ref()
+                            .and_then(|i| i.option("clientPin"))
+                        {
+                            Some(true) => {
+                                ui.horizontal(|ui| {
+                                    theme::pill(ui, "PIN set", p.ok, p.ok_soft());
+                                    ui.add_space(8.0);
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "PIN configured \u{00B7} ready for passkeys",
+                                        )
                                         .font(theme::f_reg(13.0))
                                         .color(p.txt2),
+                                    );
+                                });
+                            }
+                            Some(false) => {
+                                theme::pill(ui, "No PIN configured", p.warn, p.warn_soft());
+                            }
+                            None => {
+                                ui.label(
+                                    egui::RichText::new("Reading key\u{2026}")
+                                        .font(theme::f_reg(13.0))
+                                        .color(p.txt3),
+                                );
+                            }
+                        }
+                    });
+                    ui.add_space(14.0);
+                }
+                if dev.caps.has(Caps::OATH) {
+                    theme::card_frame(p).show(ui, |ui| {
+                        if self.card_head(ui, p, "Authenticator codes (OATH)", "oath") {
+                            self.cap_tab = CapTab::Oath;
+                        }
+                        ui.add_space(8.0);
+                        if self.oath.loaded && !self.oath.creds.is_empty() {
+                            let total = self.oath.creds.len();
+                            let mut copy = None;
+                            for row in self.oath.creds.iter().take(2) {
+                                let is_copied =
+                                    self.copied.as_ref().is_some_and(|(n, _)| n == &row.name);
+                                if let (Some(code), _) = oath_row(
+                                    ui,
+                                    p,
+                                    &row.name,
+                                    row.code.as_deref(),
+                                    is_copied,
+                                    false,
+                                ) {
+                                    copy = Some((row.name.clone(), code));
+                                }
+                                ui.add_space(6.0);
+                            }
+                            if total > 2 {
+                                ui.label(
+                                    egui::RichText::new(format!("+{} more codes", total - 2))
+                                        .font(theme::f_reg(12.5))
+                                        .color(p.txt3),
+                                );
+                            }
+                            if let Some((name, code)) = copy {
+                                ui.output_mut(|o| o.copied_text = code);
+                                self.copied = Some((name, now_secs_f64() + 1.2));
+                            }
+                        } else {
+                            ui.label(
+                                egui::RichText::new("Open Authenticator to view live codes.")
+                                    .font(theme::f_reg(13.0))
+                                    .color(p.txt3),
+                            );
+                        }
+                    });
+                    ui.add_space(14.0);
+                }
+                if dev.caps.has(Caps::PGP) {
+                    theme::card_frame(p).show(ui, |ui| {
+                        if self.card_head(ui, p, "OpenPGP", "pgp") {
+                            self.cap_tab = CapTab::Pgp;
+                        }
+                        ui.add_space(8.0);
+                        if let Some(st) = &self.openpgp.status {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing.x = 5.0;
+                                theme::pill(
+                                    ui,
+                                    &format!(
+                                        "Signature \u{00B7} {}",
+                                        slot_summary(st.sig_algo_id, &st.fingerprint_sig)
+                                    ),
+                                    p.txt2,
+                                    p.raised2,
+                                );
+                                theme::pill(
+                                    ui,
+                                    &format!(
+                                        "Encryption \u{00B7} {}",
+                                        slot_summary(st.dec_algo_id, &st.fingerprint_dec)
+                                    ),
+                                    p.txt2,
+                                    p.raised2,
+                                );
+                                theme::pill(
+                                    ui,
+                                    &format!(
+                                        "Auth \u{00B7} {}",
+                                        slot_summary(st.aut_algo_id, &st.fingerprint_aut)
+                                    ),
+                                    p.txt2,
+                                    p.raised2,
                                 );
                             });
-                        }
-                        Some(false) => {
-                            theme::pill(ui, "No PIN configured", p.warn, p.warn_soft());
-                        }
-                        None => {
-                            ui.label(egui::RichText::new("Reading key\u{2026}").font(theme::f_reg(13.0)).color(p.txt3));
-                        }
-                    }
-                });
-                ui.add_space(14.0);
-            }
-            if dev.caps.has(Caps::OATH) {
-                theme::card_frame(p).show(ui, |ui| {
-                    if self.card_head(ui, p, "Authenticator codes (OATH)", "oath") {
-                        self.cap_tab = CapTab::Oath;
-                    }
-                    ui.add_space(8.0);
-                    if self.oath.loaded && !self.oath.creds.is_empty() {
-                        let total = self.oath.creds.len();
-                        let mut copy = None;
-                        for row in self.oath.creds.iter().take(2) {
-                            let is_copied = self.copied.as_ref().map_or(false, |(n, _)| n == &row.name);
-                            if let (Some(code), _) = oath_row(ui, p, &row.name, row.code.as_deref(), is_copied, false) {
-                                copy = Some((row.name.clone(), code));
-                            }
-                            ui.add_space(6.0);
-                        }
-                        if total > 2 {
-                            ui.label(egui::RichText::new(format!("+{} more codes", total - 2)).font(theme::f_reg(12.5)).color(p.txt3));
-                        }
-                        if let Some((name, code)) = copy {
-                            ui.output_mut(|o| o.copied_text = code);
-                            self.copied = Some((name, now_secs_f64() + 1.2));
-                        }
-                    } else {
-                        ui.label(
-                            egui::RichText::new("Open Authenticator to view live codes.")
+                        } else {
+                            ui.label(
+                                egui::RichText::new(
+                                    "Open OpenPGP and Read status to view key slots.",
+                                )
                                 .font(theme::f_reg(13.0))
                                 .color(p.txt3),
-                        );
-                    }
-                });
-                ui.add_space(14.0);
-            }
-            if dev.caps.has(Caps::PGP) {
-                theme::card_frame(p).show(ui, |ui| {
-                    if self.card_head(ui, p, "OpenPGP", "pgp") {
-                        self.cap_tab = CapTab::Pgp;
-                    }
-                    ui.add_space(8.0);
-                    if let Some(st) = &self.openpgp.status {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing.x = 5.0;
-                            theme::pill(ui, &format!("Signature \u{00B7} {}", slot_summary(st.sig_algo_id, &st.fingerprint_sig)), p.txt2, p.raised2);
-                            theme::pill(ui, &format!("Encryption \u{00B7} {}", slot_summary(st.dec_algo_id, &st.fingerprint_dec)), p.txt2, p.raised2);
-                            theme::pill(ui, &format!("Auth \u{00B7} {}", slot_summary(st.aut_algo_id, &st.fingerprint_aut)), p.txt2, p.raised2);
-                        });
-                    } else {
-                        ui.label(
-                            egui::RichText::new("Open OpenPGP and Read status to view key slots.")
-                                .font(theme::f_reg(13.0))
-                                .color(p.txt3),
-                        );
-                    }
-                });
-                ui.add_space(14.0);
-            }
-            if dev.caps.has(Caps::PIV) {
-                theme::card_frame(p).show(ui, |ui| {
-                    if self.card_head(ui, p, "PIV smart card", "piv") {
-                        self.cap_tab = CapTab::Piv;
-                    }
-                    ui.add_space(8.0);
-                    if let Some(st) = &self.piv.status {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing.x = 5.0;
-                            for slot in &st.slots {
-                                let lab = format!("{:02X} \u{00B7} {}", slot.slot.key_ref(), if slot.cert_present { "cert" } else { "empty" });
-                                theme::pill(ui, &lab, p.txt2, p.raised2);
-                            }
-                        });
-                    } else {
-                        ui.label(
-                            egui::RichText::new("Open PIV to read certificate slots.")
-                                .font(theme::f_reg(13.0))
-                                .color(p.txt3),
-                        );
-                    }
-                });
-            }
-        });
+                            );
+                        }
+                    });
+                    ui.add_space(14.0);
+                }
+                if dev.caps.has(Caps::PIV) {
+                    theme::card_frame(p).show(ui, |ui| {
+                        if self.card_head(ui, p, "PIV smart card", "piv") {
+                            self.cap_tab = CapTab::Piv;
+                        }
+                        ui.add_space(8.0);
+                        if let Some(st) = &self.piv.status {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing.x = 5.0;
+                                for slot in &st.slots {
+                                    let lab = format!(
+                                        "{:02X} \u{00B7} {}",
+                                        slot.slot.key_ref(),
+                                        if slot.cert_present { "cert" } else { "empty" }
+                                    );
+                                    theme::pill(ui, &lab, p.txt2, p.raised2);
+                                }
+                            });
+                        } else {
+                            ui.label(
+                                egui::RichText::new("Open PIV to read certificate slots.")
+                                    .font(theme::f_reg(13.0))
+                                    .color(p.txt3),
+                            );
+                        }
+                    });
+                }
+            });
     }
 
     /// FIDO2 / Passkeys tab — reuses the existing PIN + credentials section.
     fn cap_fido2(&mut self, ui: &mut egui::Ui, p: &Palette) {
-        let pin_set = self.security_keys.info.as_ref().and_then(|i| i.option("clientPin"));
+        let pin_set = self
+            .security_keys
+            .info
+            .as_ref()
+            .and_then(|i| i.option("clientPin"));
 
         // --- PIN & sign-in card (inline Set / Change PIN; no floating modal) ---
         let mut go_set = false;
@@ -3085,25 +3363,27 @@ impl App {
         let mut cancel = false;
         theme::card_frame(p).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("PIN & sign-in").font(theme::f_sb(14.5)).color(p.txt));
+                ui.label(
+                    egui::RichText::new("PIN & sign-in")
+                        .font(theme::f_sb(14.5))
+                        .color(p.txt),
+                );
                 ui.add_space(6.0);
                 self.help_dot(ui, p, "pin");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match pin_set {
-                    Some(true) => {
-                        if theme::button(ui, p, BtnKind::Default, "Change PIN").clicked() {
-                            let open = !self.security_keys.change_pin.open;
-                            self.security_keys.change_pin = ChangePinDialog { open, ..Default::default() };
-                            self.security_keys.error = None;
-                        }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (kind, label) = match pin_set {
+                        Some(true) => (BtnKind::Default, "Change PIN"),
+                        Some(false) => (BtnKind::Primary, "Set a PIN"),
+                        None => return,
+                    };
+                    if theme::button(ui, p, kind, label).clicked() {
+                        let open = !self.security_keys.change_pin.open;
+                        self.security_keys.change_pin = ChangePinDialog {
+                            open,
+                            ..Default::default()
+                        };
+                        self.security_keys.error = None;
                     }
-                    Some(false) => {
-                        if theme::button(ui, p, BtnKind::Primary, "Set a PIN").clicked() {
-                            let open = !self.security_keys.change_pin.open;
-                            self.security_keys.change_pin = ChangePinDialog { open, ..Default::default() };
-                            self.security_keys.error = None;
-                        }
-                    }
-                    None => {}
                 });
             });
             ui.add_space(8.0);
@@ -3112,19 +3392,39 @@ impl App {
                     ui.horizontal(|ui| {
                         theme::pill(ui, "PIN set", p.ok, p.ok_soft());
                         ui.add_space(8.0);
-                        ui.label(egui::RichText::new("This key has a PIN. Unlock below to manage passkeys.").font(theme::f_reg(13.0)).color(p.txt2));
+                        ui.label(
+                            egui::RichText::new(
+                                "This key has a PIN. Unlock below to manage passkeys.",
+                            )
+                            .font(theme::f_reg(13.0))
+                            .color(p.txt2),
+                        );
                     });
                 }
                 Some(false) => {
                     ui.horizontal(|ui| {
                         theme::pill(ui, "No PIN yet", p.warn, p.warn_soft());
                         ui.add_space(8.0);
-                        ui.label(egui::RichText::new("Set a PIN to protect this key and turn on passkeys.").font(theme::f_reg(13.0)).color(p.txt2));
+                        ui.label(
+                            egui::RichText::new(
+                                "Set a PIN to protect this key and turn on passkeys.",
+                            )
+                            .font(theme::f_reg(13.0))
+                            .color(p.txt2),
+                        );
                     });
                 }
                 None => {
-                    let msg = if self.security_keys.error.is_some() { "Couldn't read this key." } else { "Reading key\u{2026}" };
-                    ui.label(egui::RichText::new(msg).font(theme::f_reg(13.0)).color(p.txt3));
+                    let msg = if self.security_keys.error.is_some() {
+                        "Couldn't read this key."
+                    } else {
+                        "Reading key\u{2026}"
+                    };
+                    ui.label(
+                        egui::RichText::new(msg)
+                            .font(theme::f_reg(13.0))
+                            .color(p.txt3),
+                    );
                 }
             }
 
@@ -3136,7 +3436,15 @@ impl App {
                     .inner_margin(egui::Margin::same(12.0))
                     .rounding(egui::Rounding::same(8.0))
                     .show(ui, |ui| {
-                        ui.label(egui::RichText::new(if setting { "Create a PIN" } else { "Change PIN" }).font(theme::f_sb(13.0)).color(p.txt));
+                        ui.label(
+                            egui::RichText::new(if setting {
+                                "Create a PIN"
+                            } else {
+                                "Change PIN"
+                            })
+                            .font(theme::f_sb(13.0))
+                            .color(p.txt),
+                        );
                         ui.add_space(8.0);
                         if setting {
                             pin_field(ui, p, "New PIN", &mut self.security_keys.change_pin.new);
@@ -3147,7 +3455,14 @@ impl App {
                         }
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
-                            if theme::button(ui, p, BtnKind::Primary, if setting { "Set PIN" } else { "Change PIN" }).clicked() {
+                            if theme::button(
+                                ui,
+                                p,
+                                BtnKind::Primary,
+                                if setting { "Set PIN" } else { "Change PIN" },
+                            )
+                            .clicked()
+                            {
                                 if setting {
                                     go_set = true;
                                 } else {
@@ -3160,7 +3475,13 @@ impl App {
                             }
                         });
                         ui.add_space(4.0);
-                        ui.label(egui::RichText::new("4\u{2013}63 characters. You'll touch the key to confirm.").font(theme::f_reg(11.5)).color(p.txt3));
+                        ui.label(
+                            egui::RichText::new(
+                                "4\u{2013}63 characters. You'll touch the key to confirm.",
+                            )
+                            .font(theme::f_reg(11.5))
+                            .color(p.txt3),
+                        );
                     });
             }
 
@@ -3188,7 +3509,11 @@ impl App {
             let mut delete: Option<Vec<u8>> = None;
             theme::card_frame(p).show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Resident passkeys").font(theme::f_sb(14.5)).color(p.txt));
+                    ui.label(
+                        egui::RichText::new("Resident passkeys")
+                            .font(theme::f_sb(14.5))
+                            .color(p.txt),
+                    );
                     ui.add_space(6.0);
                     self.help_dot(ui, p, "passkeys");
                     if self.security_keys.session.is_some() {
@@ -3204,28 +3529,20 @@ impl App {
                     }
                 });
                 ui.add_space(8.0);
-                if self.security_keys.session.is_none() {
-                    ui.horizontal(|ui| {
-                        let resp = ui.add(
-                            egui::TextEdit::singleline(&mut self.security_keys.pin_input)
-                                .password(true)
-                                .hint_text("Enter PIN to view passkeys")
-                                .desired_width(220.0),
-                        );
-                        let submit = theme::button(ui, p, BtnKind::Primary, "Unlock").clicked();
-                        if submit || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
-                            unlock = true;
-                        }
-                    });
-                } else {
-                    let (existing, max_remaining, rps) = {
-                        let s = self.security_keys.session.as_ref().expect("checked");
-                        (s.metadata.existing_count, s.metadata.max_remaining, s.rps.clone())
-                    };
+                let session_info = self.security_keys.session.as_ref().map(|s| {
+                    (
+                        s.metadata.existing_count,
+                        s.metadata.max_remaining,
+                        s.rps.clone(),
+                    )
+                });
+                if let Some((existing, max_remaining, rps)) = session_info {
                     ui.label(
-                        egui::RichText::new(format!("{existing} stored \u{00B7} room for {max_remaining} more"))
-                            .font(theme::f_reg(12.5))
-                            .color(p.txt2),
+                        egui::RichText::new(format!(
+                            "{existing} stored \u{00B7} room for {max_remaining} more"
+                        ))
+                        .font(theme::f_reg(12.5))
+                        .color(p.txt2),
                     );
                     ui.add_space(6.0);
                     if rps.is_empty() {
@@ -3235,35 +3552,66 @@ impl App {
                                 .color(p.txt3),
                         );
                     }
-                    egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                        for (rp, creds) in &rps {
-                            let header = if let Some(name) = rp.name.as_ref().filter(|s| !s.is_empty()) {
-                                format!("{}  ({})", rp.id, name)
-                            } else {
-                                rp.id.clone()
-                            };
-                            ui.collapsing(header, |ui| {
-                                if creds.is_empty() {
-                                    ui.label("(no credentials)");
-                                }
-                                for c in creds {
-                                    ui.horizontal(|ui| {
-                                        ui.monospace(hex_short(&c.credential_id));
-                                        let user_field = c
-                                            .user
-                                            .display_name
-                                            .clone()
-                                            .or_else(|| c.user.name.clone())
-                                            .unwrap_or_else(|| String::from_utf8_lossy(&c.user.id).into_owned());
-                                        ui.label(user_field);
-                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            if theme::button(ui, p, BtnKind::Ghost, "Remove").clicked() {
-                                                delete = Some(c.credential_id.clone());
-                                            }
+                    egui::ScrollArea::vertical()
+                        .max_height(320.0)
+                        .show(ui, |ui| {
+                            for (rp, creds) in &rps {
+                                let header = if let Some(name) =
+                                    rp.name.as_ref().filter(|s| !s.is_empty())
+                                {
+                                    format!("{}  ({})", rp.id, name)
+                                } else {
+                                    rp.id.clone()
+                                };
+                                ui.collapsing(header, |ui| {
+                                    if creds.is_empty() {
+                                        ui.label("(no credentials)");
+                                    }
+                                    for c in creds {
+                                        ui.horizontal(|ui| {
+                                            ui.monospace(hex_short(&c.credential_id));
+                                            let user_field = c
+                                                .user
+                                                .display_name
+                                                .clone()
+                                                .or_else(|| c.user.name.clone())
+                                                .unwrap_or_else(|| {
+                                                    String::from_utf8_lossy(&c.user.id).into_owned()
+                                                });
+                                            ui.label(user_field);
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    if theme::button(
+                                                        ui,
+                                                        p,
+                                                        BtnKind::Ghost,
+                                                        "Remove",
+                                                    )
+                                                    .clicked()
+                                                    {
+                                                        delete = Some(c.credential_id.clone());
+                                                    }
+                                                },
+                                            );
                                         });
-                                    });
-                                }
-                            });
+                                    }
+                                });
+                            }
+                        });
+                } else {
+                    ui.horizontal(|ui| {
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(&mut self.security_keys.pin_input)
+                                .password(true)
+                                .hint_text("Enter PIN to view passkeys")
+                                .desired_width(220.0),
+                        );
+                        let submit = theme::button(ui, p, BtnKind::Primary, "Unlock").clicked();
+                        if submit
+                            || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                        {
+                            unlock = true;
                         }
                     });
                 }
@@ -3289,7 +3637,11 @@ impl App {
             .stroke(egui::Stroke::new(1.0, theme::tint(p.err, 90)))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Reset this key").font(theme::f_sb(14.5)).color(p.err));
+                    ui.label(
+                        egui::RichText::new("Reset this key")
+                            .font(theme::f_sb(14.5))
+                            .color(p.err),
+                    );
                     ui.add_space(6.0);
                     self.help_dot(ui, p, "reset");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -3299,13 +3651,18 @@ impl App {
                     });
                 });
                 ui.label(
-                    egui::RichText::new("Wipes every passkey and the PIN on this key. Cannot be undone.")
-                        .font(theme::f_reg(12.5))
-                        .color(p.txt2),
+                    egui::RichText::new(
+                        "Wipes every passkey and the PIN on this key. Cannot be undone.",
+                    )
+                    .font(theme::f_reg(12.5))
+                    .color(p.txt2),
                 );
             });
         if arm_reset {
-            self.security_keys.reset = ResetDialog { open: true, ..Default::default() };
+            self.security_keys.reset = ResetDialog {
+                open: true,
+                ..Default::default()
+            };
         }
     }
 
@@ -3317,12 +3674,20 @@ impl App {
             self.load_oath_creds();
         }
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Authenticator codes").font(theme::f_sb(14.5)).color(p.txt));
+            ui.label(
+                egui::RichText::new("Authenticator codes")
+                    .font(theme::f_sb(14.5))
+                    .color(p.txt),
+            );
             ui.add_space(6.0);
             self.help_dot(ui, p, "oath");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if theme::button(ui, p, BtnKind::Primary, "+ Add credential").clicked() {
-                    self.oath.add = OathAddDialog { open: true, totp: true, ..Default::default() };
+                    self.oath.add = OathAddDialog {
+                        open: true,
+                        totp: true,
+                        ..Default::default()
+                    };
                 }
                 ui.add_space(6.0);
                 if theme::button(ui, p, BtnKind::Default, "Refresh").clicked() {
@@ -3346,7 +3711,11 @@ impl App {
                 );
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut self.oath.password_input).password(true).desired_width(220.0));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.oath.password_input)
+                            .password(true)
+                            .desired_width(220.0),
+                    );
                     if theme::button(ui, p, BtnKind::Primary, "Unlock").clicked() {
                         self.load_oath_creds();
                     }
@@ -3355,11 +3724,19 @@ impl App {
             return;
         }
         if !self.oath.loaded {
-            ui.label(egui::RichText::new("Reading codes\u{2026}").font(theme::f_reg(13.0)).color(p.txt3));
+            ui.label(
+                egui::RichText::new("Reading codes\u{2026}")
+                    .font(theme::f_reg(13.0))
+                    .color(p.txt3),
+            );
             return;
         }
         if self.oath.creds.is_empty() {
-            ui.label(egui::RichText::new("No authenticator codes on this key.").font(theme::f_reg(13.0)).color(p.txt3));
+            ui.label(
+                egui::RichText::new("No authenticator codes on this key.")
+                    .font(theme::f_reg(13.0))
+                    .color(p.txt3),
+            );
             return;
         }
 
@@ -3368,7 +3745,7 @@ impl App {
         theme::card_frame(p).show(ui, |ui| {
             let n = self.oath.creds.len();
             for (i, row) in self.oath.creds.iter().enumerate() {
-                let is_copied = self.copied.as_ref().map_or(false, |(nm, _)| nm == &row.name);
+                let is_copied = self.copied.as_ref().is_some_and(|(nm, _)| nm == &row.name);
                 let (c, d) = oath_row(ui, p, &row.name, row.code.as_deref(), is_copied, true);
                 if let Some(code) = c {
                     copy = Some((row.name.clone(), code));
@@ -3379,7 +3756,11 @@ impl App {
                 if i + 1 < n {
                     ui.add_space(5.0);
                     let y = ui.cursor().top();
-                    ui.painter().hline(ui.max_rect().x_range(), y, egui::Stroke::new(1.0, p.line_soft));
+                    ui.painter().hline(
+                        ui.max_rect().x_range(),
+                        y,
+                        egui::Stroke::new(1.0, p.line_soft),
+                    );
                     ui.add_space(5.0);
                 }
             }
@@ -3396,7 +3777,11 @@ impl App {
     /// OpenPGP tab — read-only status + the existing management section.
     fn cap_pgp(&mut self, ui: &mut egui::Ui, p: &Palette) {
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("OpenPGP").font(theme::f_sb(14.5)).color(p.txt));
+            ui.label(
+                egui::RichText::new("OpenPGP")
+                    .font(theme::f_sb(14.5))
+                    .color(p.txt),
+            );
             ui.add_space(6.0);
             self.help_dot(ui, p, "pgp");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -3420,11 +3805,48 @@ impl App {
                 if let Some(serial) = status.serial() {
                     kv(ui, "Serial", &format!("{serial} (0x{serial:08X})"));
                 }
-                kv(ui, "Signature key", &format!("{}  {}", algo_id_label(status.sig_algo_id), fpr_label(&status.fingerprint_sig)));
-                kv(ui, "Decryption key", &format!("{}  {}", algo_id_label(status.dec_algo_id), fpr_label(&status.fingerprint_dec)));
-                kv(ui, "Authentication key", &format!("{}  {}", algo_id_label(status.aut_algo_id), fpr_label(&status.fingerprint_aut)));
-                kv(ui, "PIN retries", &format!("PW1={} RC={} PW3={}", status.tries_pw1, status.tries_rc, status.tries_pw3));
-                kv(ui, "Signatures made", &status.signature_count.map_or("(unavailable)".to_string(), |n| n.to_string()));
+                kv(
+                    ui,
+                    "Signature key",
+                    &format!(
+                        "{}  {}",
+                        algo_id_label(status.sig_algo_id),
+                        fpr_label(&status.fingerprint_sig)
+                    ),
+                );
+                kv(
+                    ui,
+                    "Decryption key",
+                    &format!(
+                        "{}  {}",
+                        algo_id_label(status.dec_algo_id),
+                        fpr_label(&status.fingerprint_dec)
+                    ),
+                );
+                kv(
+                    ui,
+                    "Authentication key",
+                    &format!(
+                        "{}  {}",
+                        algo_id_label(status.aut_algo_id),
+                        fpr_label(&status.fingerprint_aut)
+                    ),
+                );
+                kv(
+                    ui,
+                    "PIN retries",
+                    &format!(
+                        "PW1={} RC={} PW3={}",
+                        status.tries_pw1, status.tries_rc, status.tries_pw3
+                    ),
+                );
+                kv(
+                    ui,
+                    "Signatures made",
+                    &status
+                        .signature_count
+                        .map_or("(unavailable)".to_string(), |n| n.to_string()),
+                );
             });
         } else {
             ui.label(
@@ -3444,7 +3866,11 @@ impl App {
             self.load_piv_status();
         }
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("PIV smart card").font(theme::f_sb(14.5)).color(p.txt));
+            ui.label(
+                egui::RichText::new("PIV smart card")
+                    .font(theme::f_sb(14.5))
+                    .color(p.txt),
+            );
             ui.add_space(6.0);
             self.help_dot(ui, p, "piv");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -3462,20 +3888,42 @@ impl App {
         }
         if let Some(st) = &self.piv.status {
             theme::card_frame(p).show(ui, |ui| {
-                kv(ui, "Applet version", &st.version.map_or("\u{2014}".to_string(), |(a, b, c)| format!("{a}.{b}.{c}")));
-                kv(ui, "Serial", &st.serial.map_or("\u{2014}".to_string(), |s| s.to_string()));
-                kv(ui, "PIN retries", &st.pin_retries.map_or("\u{2014}".to_string(), |n| n.to_string()));
+                kv(
+                    ui,
+                    "Applet version",
+                    &st.version
+                        .map_or("\u{2014}".to_string(), |(a, b, c)| format!("{a}.{b}.{c}")),
+                );
+                kv(
+                    ui,
+                    "Serial",
+                    &st.serial.map_or("\u{2014}".to_string(), |s| s.to_string()),
+                );
+                kv(
+                    ui,
+                    "PIN retries",
+                    &st.pin_retries
+                        .map_or("\u{2014}".to_string(), |n| n.to_string()),
+                );
                 ui.add_space(6.0);
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 5.0;
                     for slot in &st.slots {
-                        let lab = format!("{:02X} \u{00B7} {}", slot.slot.key_ref(), if slot.cert_present { "cert" } else { "empty" });
+                        let lab = format!(
+                            "{:02X} \u{00B7} {}",
+                            slot.slot.key_ref(),
+                            if slot.cert_present { "cert" } else { "empty" }
+                        );
                         theme::pill(ui, &lab, p.txt2, p.raised2);
                     }
                 });
             });
         } else if self.piv.error.is_none() {
-            ui.label(egui::RichText::new("Reading PIV status\u{2026}").font(theme::f_reg(13.0)).color(p.txt3));
+            ui.label(
+                egui::RichText::new("Reading PIV status\u{2026}")
+                    .font(theme::f_reg(13.0))
+                    .color(p.txt3),
+            );
         }
     }
 
@@ -3486,7 +3934,10 @@ impl App {
         // dots, links, selection highlights and primary action are all one
         // orange rather than mixing the app's blue accent into the token's
         // identity. Green stays for status, red for danger.
-        let mp = Palette { accent: p.brand, ..*p };
+        let mp = Palette {
+            accent: p.brand,
+            ..*p
+        };
         let p = &mp;
         let mut open_rename = false;
         let mut do_save = false;
@@ -3559,17 +4010,7 @@ impl App {
                     });
                 });
             });
-        if open_rename {
-            self.rename_open = true;
-            self.rename_input = dev.name.clone().unwrap_or_default();
-        }
-        if do_cancel {
-            self.rename_open = false;
-            self.rename_input.clear();
-        }
-        if do_save {
-            self.save_device_name();
-        }
+        self.apply_rename_actions(dev, open_rename, do_cancel, do_save);
 
         // --- Device-wide settings (apply to the whole token) ---
         egui::Frame::none()
@@ -3968,14 +4409,23 @@ fn oath_row(
     let mut delete = false;
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
-            ui.label(egui::RichText::new(issuer).font(theme::f_sb(13.5)).color(p.txt));
+            ui.label(
+                egui::RichText::new(issuer)
+                    .font(theme::f_sb(13.5))
+                    .color(p.txt),
+            );
             if !account.is_empty() {
-                ui.label(egui::RichText::new(account).font(theme::f_reg(12.0)).color(p.txt3));
+                ui.label(
+                    egui::RichText::new(account)
+                        .font(theme::f_reg(12.0))
+                        .color(p.txt3),
+                );
             }
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if with_delete {
-                let (xr, xresp) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+                let (xr, xresp) =
+                    ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
                 paint_x_icon(ui, xr.center(), p.txt3);
                 if xresp.on_hover_text("Delete").clicked() {
                     delete = true;
@@ -3994,16 +4444,28 @@ fn oath_row(
                 }
             }
             ui.add_space(10.0);
-            ui.label(egui::RichText::new(format!("{secs}s")).font(theme::f_reg(11.0)).color(p.txt3));
+            ui.label(
+                egui::RichText::new(format!("{secs}s"))
+                    .font(theme::f_reg(11.0))
+                    .color(p.txt3),
+            );
             ui.add_space(5.0);
             theme::ring(ui, pct, 20.0, code_color, p.line);
             ui.add_space(14.0);
             match code {
                 Some(c) => {
-                    ui.label(egui::RichText::new(c).font(theme::f_mono(19.0)).color(code_color));
+                    ui.label(
+                        egui::RichText::new(c)
+                            .font(theme::f_mono(19.0))
+                            .color(code_color),
+                    );
                 }
                 None => {
-                    ui.label(egui::RichText::new("touch").font(theme::f_reg(13.0)).color(p.txt3));
+                    ui.label(
+                        egui::RichText::new("touch")
+                            .font(theme::f_reg(13.0))
+                            .color(p.txt3),
+                    );
                 }
             }
         });
@@ -4016,7 +4478,11 @@ fn editor_row(ui: &mut egui::Ui, p: &Palette, label: &str, add: impl FnOnce(&mut
     ui.horizontal(|ui| {
         ui.add_sized(
             [92.0, 22.0],
-            egui::Label::new(egui::RichText::new(label).font(theme::f_reg(13.0)).color(p.txt2)),
+            egui::Label::new(
+                egui::RichText::new(label)
+                    .font(theme::f_reg(13.0))
+                    .color(p.txt2),
+            ),
         );
         add(ui);
     });

@@ -24,14 +24,14 @@ pub enum Mode {
 pub struct Palette {
     // part of the palette API; not yet used
     #[allow(dead_code)]
-    pub stage: Color32,     // window backdrop / behind cards
-    pub surface: Color32,   // main + central panel fill
-    pub bar: Color32,       // top bar / log drawer
-    pub side: Color32,      // device sidebar
-    pub panel: Color32,     // cards
-    pub raised: Color32,    // inputs
-    pub raised2: Color32,   // chips / hover
-    pub pop: Color32,       // popovers / callouts
+    pub stage: Color32, // window backdrop / behind cards
+    pub surface: Color32, // main + central panel fill
+    pub bar: Color32,     // top bar / log drawer
+    pub side: Color32,    // device sidebar
+    pub panel: Color32,   // cards
+    pub raised: Color32,  // inputs
+    pub raised2: Color32, // chips / hover
+    pub pop: Color32,     // popovers / callouts
     pub line: Color32,
     pub line_soft: Color32,
     pub txt: Color32,
@@ -216,10 +216,14 @@ pub fn install_fonts(ctx: &egui::Context) {
         .entry(FontFamily::Monospace)
         .or_default()
         .insert(0, "jb".into());
-    f.families
-        .insert(FontFamily::Name("semibold".into()), vec!["plex_sb".into(), "plex".into()]);
-    f.families
-        .insert(FontFamily::Name("bold".into()), vec!["plex_b".into(), "plex".into()]);
+    f.families.insert(
+        FontFamily::Name("semibold".into()),
+        vec!["plex_sb".into(), "plex".into()],
+    );
+    f.families.insert(
+        FontFamily::Name("bold".into()),
+        vec!["plex_b".into(), "plex".into()],
+    );
     ctx.set_fonts(f);
 }
 

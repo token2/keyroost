@@ -29,12 +29,7 @@ use theme::{f_bold, f_reg, Palette};
 /// always wrapped in a filled `Frame` (fill = palette.pop), which is the egui
 /// equivalent of the prototype bug where the popover rendered outside the themed
 /// container.
-pub fn help_popover(
-    ctx: &egui::Context,
-    p: &Palette,
-    topic: &str,
-    anchor: egui::Pos2,
-) -> bool {
+pub fn help_popover(ctx: &egui::Context, p: &Palette, topic: &str, anchor: egui::Pos2) -> bool {
     let Some(h) = help::help(topic) else {
         return true; // unknown topic -> treat as closed
     };
@@ -50,10 +45,7 @@ pub fn help_popover(
         .show(ctx, |ui| {
             ui.painter()
                 .rect_filled(screen, 0.0, egui::Color32::from_black_alpha(97));
-            if ui
-                .allocate_rect(screen, egui::Sense::click())
-                .clicked()
-            {
+            if ui.allocate_rect(screen, egui::Sense::click()).clicked() {
                 dismissed = true;
             }
         });

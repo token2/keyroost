@@ -156,7 +156,11 @@ impl CtapHidDevice {
     /// Send a CTAPHID command and read the response.
     pub fn transact(&mut self, cmd: u8, payload: &[u8]) -> Result<Vec<u8>, HidTransportError> {
         if ctap_trace_enabled() {
-            eprintln!("CTAP > cmd=0x{cmd:02x} len={} {}", payload.len(), hexline(payload));
+            eprintln!(
+                "CTAP > cmd=0x{cmd:02x} len={} {}",
+                payload.len(),
+                hexline(payload)
+            );
         }
         self.send(self.channel_id, cmd, payload)?;
         let resp = self.recv(self.channel_id, cmd)?;

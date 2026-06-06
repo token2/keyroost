@@ -18,7 +18,10 @@ pub fn model_for_aaguid(aaguid: &[u8; 16]) -> Option<&'static str> {
         return None;
     }
     let key = format_aaguid(aaguid);
-    MODELS.iter().find(|(k, _)| *k == key).map(|&(_, name)| name)
+    MODELS
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|&(_, name)| name)
 }
 
 /// Format a 16-byte AAGUID as canonical lowercase `8-4-4-4-12` hex.

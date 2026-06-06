@@ -171,7 +171,11 @@ fn clean_model(raw: &str, vendor: &str) -> String {
     }
     // 3. Strip a leading vendor word (shown in its own column).
     let lead = s.trim_start();
-    if !vendor.is_empty() && lead.to_ascii_lowercase().starts_with(&vendor.to_ascii_lowercase()) {
+    if !vendor.is_empty()
+        && lead
+            .to_ascii_lowercase()
+            .starts_with(&vendor.to_ascii_lowercase())
+    {
         s = lead[vendor.len()..].to_string();
     }
     // 4. Collapse whitespace, then drop trailing two-digit pcsc index groups
@@ -291,7 +295,11 @@ pub fn enumerate() -> Result<Vec<UiDevice>, String> {
         } else {
             // First whitespace-delimited token of the reader name is usually the
             // manufacturer (e.g. "Nitrokey", "Yubico").
-            p.reader_name.split_whitespace().next().unwrap_or("Key").to_string()
+            p.reader_name
+                .split_whitespace()
+                .next()
+                .unwrap_or("Key")
+                .to_string()
         };
         let model = clean_model(&p.reader_name, &vendor);
         devices.push(UiDevice {
