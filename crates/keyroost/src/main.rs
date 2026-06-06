@@ -60,11 +60,15 @@ struct ResetDialog {
 /// `update()` against the live FIDO HID list (no PC/SC, so it can't disturb
 /// other cards).
 struct ResetArm {
-    /// The armed key's HID path at arm time; its disappearance is what counts
-    /// as the "unplug" half of the dance (so bumping a *different* key doesn't
-    /// arm the trigger).
+    /// The armed key's USB/HID serial, if it exposes one (SoloKeys / Nitrokey
+    /// do; most YubiKeys don't). When present we track the key by serial, so it
+    /// is recognised on re-insertion into *any* USB port, not just the same one.
+    target_serial: Option<String>,
+    /// The armed key's HID path at arm time. Used as the identity when there is
+    /// no serial (`target_serial` is `None`): its disappearance is the "unplug"
+    /// half of the dance, and any fresh path is treated as the re-insert.
     target_path: Option<std::path::PathBuf>,
-    /// FIDO HID paths present at the previous poll, to diff against.
+    /// FIDO HID paths present at the previous poll, to diff against (path mode).
     prev_paths: Vec<std::path::PathBuf>,
     /// True once the armed key has been unplugged; the next fresh insertion then
     /// fires the reset.
@@ -1163,16 +1167,28 @@ impl App {
         self.selected_device().and_then(|d| d.hid_path.clone())
     }
 
-    /// Wipe the selected key (authenticatorReset). Runs on the worker thread —
-    /// the card needs a touch within ~30s, which the worker keeps off the UI
-    /// frame. On success the cached session and CTAP info are cleared.
-    /// Wipe the FIDO key at `path` (authenticatorReset). Used by the armed-reset
-    /// flow, which targets the just-reconnected key rather than the (now stale)
-    /// selection.
+    /// Wipe the FIDO key at `path` (authenticatorReset). Runs on the worker
+    /// thread — the card needs a touch within ~30s, which the worker keeps off
+    /// the UI frame. Used by the armed-reset flow, which targets the
+    /// just-reconnected key rather than the (now stale) selection. On success
+    /// the cached session and CTAP info are cleared.
     fn submit_reset_path(&mut self, path: std::path::PathBuf) {
         self.spawn_job("Resetting key\u{2026} (touch now)", move || {
             let result = (|| -> Result<(), String> {
-                let (mut dev, _) = CtapHidDevice::open(&path).map_err(|e| e.to_string())?;
+                // A just-replugged node (especially on a fresh port) can take a
+                // moment to accept opens; retry briefly before giving up.
+                let mut dev = None;
+                for attempt in 0..10 {
+                    match CtapHidDevice::open(&path) {
+                        Ok((d, _)) => {
+                            dev = Some(d);
+                            break;
+                        }
+                        Err(e) if attempt == 9 => return Err(e.to_string()),
+                        Err(_) => std::thread::sleep(std::time::Duration::from_millis(100)),
+                    }
+                }
+                let mut dev = dev.ok_or_else(|| "could not open key".to_string())?;
                 keyroost_ctap::reset(&mut dev).map_err(|e| e.to_string())
             })();
             Box::new(move |app: &mut App| match result {
@@ -1495,11 +1511,18 @@ impl App {
             });
         if arm {
             // Snapshot the current FIDO keys so the poll can tell when ours
-            // leaves and a fresh one arrives.
-            let prev_paths = Self::fido_paths();
+            // leaves and a fresh one arrives. Prefer the armed key's HID serial
+            // (port-independent) and fall back to its path.
+            let target_path = self.selected_fido_path();
+            let devices = Self::fido_devices();
+            let target_serial = target_path
+                .as_ref()
+                .and_then(|p| devices.iter().find(|(dp, _)| dp == p))
+                .and_then(|(_, s)| s.clone());
             self.reset_arm = Some(ResetArm {
-                target_path: self.selected_fido_path(),
-                prev_paths,
+                target_serial,
+                target_path,
+                prev_paths: devices.into_iter().map(|(p, _)| p).collect(),
                 saw_removal: false,
             });
         } else if cancel || !window_open {
@@ -1509,39 +1532,51 @@ impl App {
         }
     }
 
-    /// Current FIDO HID device paths (cheap sysfs read, no PC/SC).
-    fn fido_paths() -> Vec<std::path::PathBuf> {
+    /// Current FIDO HID devices as `(path, serial)` (cheap sysfs read, no PC/SC).
+    fn fido_devices() -> Vec<(std::path::PathBuf, Option<String>)> {
         keyroost_hid::enumerate()
             .unwrap_or_default()
             .into_iter()
             .filter(HidDevice::is_fido)
-            .map(|h| h.path)
+            .map(|h| (h.path, h.serial_number))
             .collect()
     }
 
     /// Poll the live FIDO list while a reset is armed: once the armed key has
-    /// been unplugged, fire the reset on the next freshly-inserted key (which is
-    /// the user re-plugging it), inside the ~10 s window.
+    /// been unplugged, fire the reset on its re-insertion (which the user does),
+    /// inside the ~10 s window. Matches by HID serial when the key exposes one
+    /// (so it works across USB ports) and falls back to the HID path otherwise.
     fn poll_reset_arm(&mut self) {
-        let current = Self::fido_paths();
+        let current = Self::fido_devices();
         let mut fire: Option<std::path::PathBuf> = None;
         if let Some(arm) = self.reset_arm.as_mut() {
-            // The armed key leaving is the "unplug" half of the dance.
-            if let Some(target) = &arm.target_path {
-                if !current.contains(target) {
-                    arm.saw_removal = true;
-                }
-            } else if arm.prev_paths.iter().any(|p| !current.contains(p)) {
-                arm.saw_removal = true;
-            }
-            // A path present now but not last poll is a fresh insertion.
-            if arm.saw_removal {
-                fire = current
+            if let Some(target_serial) = arm.target_serial.clone() {
+                // Serial mode: identity is port-independent.
+                let here = current
                     .iter()
-                    .find(|p| !arm.prev_paths.contains(p))
-                    .cloned();
+                    .find(|(_, s)| s.as_deref() == Some(target_serial.as_str()));
+                match here {
+                    None => arm.saw_removal = true, // unplugged
+                    Some((path, _)) if arm.saw_removal => fire = Some(path.clone()),
+                    Some(_) => {}
+                }
+            } else {
+                // Path mode (no serial, e.g. most YubiKeys): the armed path
+                // leaving is the unplug; any fresh path is the re-insert.
+                let present = |p: &std::path::PathBuf| current.iter().any(|(cp, _)| cp == p);
+                match &arm.target_path {
+                    Some(t) if !present(t) => arm.saw_removal = true,
+                    _ => {}
+                }
+                if arm.saw_removal {
+                    fire = current
+                        .iter()
+                        .map(|(p, _)| p)
+                        .find(|p| !arm.prev_paths.contains(p))
+                        .cloned();
+                }
             }
-            arm.prev_paths = current;
+            arm.prev_paths = current.into_iter().map(|(p, _)| p).collect();
         }
         if let Some(path) = fire {
             self.reset_arm = None;
