@@ -169,6 +169,14 @@ pub fn validate_name(name: &str) -> Result<(), KeyringError> {
     }
 }
 
+/// Remove control characters in place — terminal-escape hygiene for
+/// hand-editable fields that get echoed back to the user.
+fn strip_control_chars(s: &mut String) {
+    if s.chars().any(char::is_control) {
+        s.retain(|c| !c.is_control());
+    }
+}
+
 /// Default config path: `$XDG_CONFIG_HOME/keyroost/keys.json`, else
 /// `$HOME/.config/keyroost/keys.json`.
 pub fn config_path() -> Option<PathBuf> {
@@ -200,7 +208,26 @@ impl Keyring {
     /// Load from a specific path. A missing file yields an empty registry.
     pub fn load_from(path: &Path) -> Result<Keyring, KeyringError> {
         match fs::read_to_string(path) {
-            Ok(s) => serde_json::from_str(&s).map_err(|e| KeyringError::Parse(e.to_string())),
+            Ok(s) => {
+                let mut ring: Keyring =
+                    serde_json::from_str(&s).map_err(|e| KeyringError::Parse(e.to_string()))?;
+                // `add` validates names before they ever reach disk, so
+                // re-validate on the way back in: a hand-edited file could
+                // otherwise inject ANSI escape sequences that get echoed to
+                // the terminal in error messages and listings. Free-text
+                // fields are sanitized rather than rejected.
+                for entry in &mut ring.keys {
+                    validate_name(&entry.name)?;
+                    strip_control_chars(&mut entry.serial);
+                    for field in [&mut entry.vendor, &mut entry.aaguid, &mut entry.note]
+                        .into_iter()
+                        .flatten()
+                    {
+                        strip_control_chars(field);
+                    }
+                }
+                Ok(ring)
+            }
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Keyring::default()),
             Err(e) => Err(KeyringError::Io(e)),
         }
@@ -221,7 +248,26 @@ impl Keyring {
         }
         let json =
             serde_json::to_string_pretty(self).map_err(|e| KeyringError::Parse(e.to_string()))?;
-        fs::write(path, json + "\n")?;
+        // Write a sibling temp file and rename into place: a crash mid-write
+        // can no longer corrupt the registry, and the file is created
+        // owner-only — which security keys a person owns is their business —
+        // instead of inheriting the umask default (typically world-readable).
+        let tmp = path.with_extension("json.tmp");
+        {
+            let mut opts = fs::OpenOptions::new();
+            opts.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            use std::io::Write;
+            let mut f = opts.open(&tmp)?;
+            f.write_all(json.as_bytes())?;
+            f.write_all(b"\n")?;
+            f.sync_all()?;
+        }
+        fs::rename(&tmp, path)?;
         Ok(())
     }
 
@@ -395,5 +441,56 @@ mod tests {
     fn load_missing_is_empty() {
         let k = Keyring::load_from(Path::new("/nonexistent/keyroost/keys.json")).unwrap();
         assert!(k.keys.is_empty());
+    }
+
+    #[test]
+    fn load_rejects_invalid_names_and_strips_control_chars() {
+        let dir = std::env::temp_dir().join(format!("keyroost-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("keys.json");
+
+        // A name with an ANSI escape must fail validation on load.
+        std::fs::write(
+            &path,
+            "{\"keys\":[{\"name\":\"evil\\u001b[31m\",\"serial\":\"S1\"}]}",
+        )
+        .unwrap();
+        assert!(Keyring::load_from(&path).is_err());
+
+        // Control chars in free-text fields are stripped, not fatal.
+        std::fs::write(
+            &path,
+            "{\"keys\":[{\"name\":\"ok\",\"serial\":\"S\\u001b[2J1\",\"note\":\"a\\u0007b\"}]}",
+        )
+        .unwrap();
+        let k = Keyring::load_from(&path).unwrap();
+        assert_eq!(k.keys[0].serial, "S[2J1");
+        assert_eq!(k.keys[0].note.as_deref(), Some("ab"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_creates_owner_only_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("keyroost-perm-{}", std::process::id()));
+        let path = dir.join("keys.json");
+        let mut k = Keyring::default();
+        k.add(KeyEntry {
+            name: "test-key".into(),
+            serial: "S1".into(),
+            source: IdSource::Usb,
+            vendor: None,
+            aaguid: None,
+            note: None,
+        })
+        .unwrap();
+        k.save_to(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "keys.json must be owner-only");
+        // No temp file left behind.
+        assert!(!path.with_extension("json.tmp").exists());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
