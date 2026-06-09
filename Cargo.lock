@@ -1576,6 +1576,7 @@ dependencies = [
 name = "keyroost"
 version = "0.3.0"
 dependencies = [
+ "arboard",
  "eframe",
  "egui",
  "keyroost-ctap",

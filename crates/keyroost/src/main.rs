@@ -353,9 +353,11 @@ struct App {
     cap_tab: CapTab,
     /// Error from the last device enumeration, surfaced in the sidebar.
     devices_error: Option<String>,
-    /// When set, overwrite the OS clipboard at this time (now_secs_f64
-    /// epoch): OTP codes shouldn't sit in clipboard-manager history forever.
-    clipboard_clear_at: Option<f64>,
+    /// When set: the OTP code we placed on the clipboard and the time
+    /// (now_secs_f64 epoch) to clear it — codes shouldn't sit in
+    /// clipboard-manager history forever. Cleared conditionally: only if the
+    /// clipboard still holds that exact code.
+    clipboard_clear_at: Option<(String, f64)>,
     /// True once the first automatic device scan has been kicked off.
     scanned: bool,
     /// Sidebar filter text (filters the visible device list by vendor/model).
@@ -3005,16 +3007,21 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Clipboard hygiene: ~45s after an OTP code was copied, overwrite the
-        // clipboard so the code doesn't live on in clipboard-manager history.
-        // eframe only pushes *non-empty* copied_text to the OS clipboard, so
-        // "clearing" writes a single space. Unconditional by design — checking
-        // whether we still own the clipboard would need a clipboard-reading
-        // dependency (arboard), and a 45s-old OTP is expired anyway.
-        if let Some(t) = self.clipboard_clear_at {
+        // Clipboard hygiene: ~45s after an OTP code was copied, clear the
+        // clipboard so the code doesn't live on in clipboard-manager history —
+        // but only if the clipboard still holds that exact code. Content the
+        // user copied elsewhere in the meantime is never clobbered. arboard is
+        // already in the tree via eframe's clipboard integration; if the
+        // clipboard can't be read (e.g. some Wayland setups), fail open and
+        // clear nothing rather than risk destroying foreign content.
+        if let Some((ref code, t)) = self.clipboard_clear_at {
             let now = now_secs_f64();
             if now >= t {
-                ctx.output_mut(|o| o.copied_text = " ".to_owned());
+                if let Ok(mut cb) = arboard::Clipboard::new() {
+                    if cb.get_text().is_ok_and(|current| current == *code) {
+                        let _ = cb.clear();
+                    }
+                }
                 self.clipboard_clear_at = None;
             } else {
                 ctx.request_repaint_after(std::time::Duration::from_secs_f64((t - now).max(0.1)));
@@ -3728,9 +3735,9 @@ impl App {
                                 );
                             }
                             if let Some((name, code)) = copy {
-                                ui.output_mut(|o| o.copied_text = code);
+                                ui.output_mut(|o| o.copied_text = code.clone());
                                 self.copied = Some((name, now_secs_f64() + 1.2));
-                                self.clipboard_clear_at = Some(now_secs_f64() + 45.0);
+                                self.clipboard_clear_at = Some((code, now_secs_f64() + 45.0));
                             }
                         } else {
                             ui.label(
@@ -4238,9 +4245,9 @@ impl App {
             }
         });
         if let Some((name, code)) = copy {
-            ui.output_mut(|o| o.copied_text = code);
+            ui.output_mut(|o| o.copied_text = code.clone());
             self.copied = Some((name, now_secs_f64() + 1.2));
-            self.clipboard_clear_at = Some(now_secs_f64() + 45.0);
+            self.clipboard_clear_at = Some((code, now_secs_f64() + 45.0));
         }
         if let Some(name) = delete {
             self.oath.confirm_delete = Some(name);

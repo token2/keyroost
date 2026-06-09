@@ -165,15 +165,34 @@ pub fn validate_name(name: &str) -> Result<(), KeyringError> {
     if ok {
         Ok(())
     } else {
-        Err(KeyringError::InvalidName(name.to_string()))
+        // The rejected name is echoed in the error message; sanitize it so a
+        // hand-edited keys.json can't smuggle terminal escapes through the
+        // very rejection meant to stop them.
+        let mut shown = name.to_string();
+        strip_control_chars(&mut shown);
+        Err(KeyringError::InvalidName(shown))
     }
 }
 
 /// Remove control characters in place — terminal-escape hygiene for
-/// hand-editable fields that get echoed back to the user.
+/// hand-editable fields that get echoed back to the user. Also strips the
+/// Unicode format characters used for display spoofing (`char::is_control`
+/// covers only Cc): bidi overrides/isolates (RLO can render "key-live" out
+/// of "evil-yek"), zero-width chars, BOM, and the soft/Arabic-letter marks.
 fn strip_control_chars(s: &mut String) {
-    if s.chars().any(char::is_control) {
-        s.retain(|c| !c.is_control());
+    fn spoofing(c: char) -> bool {
+        c.is_control()
+            || matches!(c,
+                '\u{200B}'..='\u{200F}' // zero-width space/joiners, LRM/RLM
+                | '\u{202A}'..='\u{202E}' // bidi embeddings + LRO/RLO
+                | '\u{2066}'..='\u{2069}' // bidi isolates
+                | '\u{FEFF}' // BOM / ZWNBSP
+                | '\u{00AD}' // soft hyphen
+                | '\u{061C}' // Arabic letter mark
+            )
+    }
+    if s.chars().any(spoofing) {
+        s.retain(|c| !spoofing(c));
     }
 }
 
@@ -498,6 +517,20 @@ mod tests {
         .unwrap();
         assert_eq!(k.keys[0].serial, "AB[31mCD");
         assert_eq!(k.keys[0].note.as_deref(), Some("xy"));
+
+        // Unicode format chars (Cf) used for display spoofing go too: RLO
+        // would render "evil-yek" as "key-live" in a terminal listing.
+        let mut k2 = Keyring::default();
+        k2.add(KeyEntry {
+            name: "bidi".into(),
+            serial: "S\u{202E}9\u{200B}9".into(),
+            source: IdSource::Usb,
+            vendor: None,
+            aaguid: None,
+            note: None,
+        })
+        .unwrap();
+        assert_eq!(k2.keys[0].serial, "S99");
     }
 
     #[cfg(unix)]
