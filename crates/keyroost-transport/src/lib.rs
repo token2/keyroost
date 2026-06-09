@@ -234,7 +234,11 @@ impl Session {
     /// Returns an error if the device responds with anything other than `9000`.
     fn transmit(&mut self, cmd: &Command) -> Result<Vec<u8>, TransportError> {
         if self.debug {
-            eprintln!("> {:>20} >> {}", cmd.label, hex_dump(&cmd.apdu));
+            eprintln!(
+                "> {:>20} >> {}",
+                cmd.label,
+                dump_cmd(&cmd.apdu, molto2_cmd_sensitive(&cmd.apdu))
+            );
         }
         let mut buf = [0u8; 2048];
         let response = self.card.transmit(&cmd.apdu, &mut buf)?;
@@ -269,7 +273,11 @@ impl Session {
     /// Used for the probing subcommand.
     pub fn transmit_raw(&mut self, cmd: &Command) -> Result<(Vec<u8>, u8, u8), TransportError> {
         if self.debug {
-            eprintln!("> {:>20} >> {}", cmd.label, hex_dump(&cmd.apdu));
+            eprintln!(
+                "> {:>20} >> {}",
+                cmd.label,
+                dump_cmd(&cmd.apdu, molto2_cmd_sensitive(&cmd.apdu))
+            );
         }
         let mut buf = [0u8; 2048];
         let response = self.card.transmit(&cmd.apdu, &mut buf)?;
@@ -729,4 +737,79 @@ pub(crate) fn hex_dump(bytes: &[u8]) -> String {
         s.push_str(&format!("{:02X}", b));
     }
     s
+}
+
+/// Hex-dump a command APDU for `--debug` traces, hiding the data field of
+/// secret-bearing commands (PIN verify, seed/key import, …): the 5-byte
+/// header (CLA INS P1 P2 Lc) stays visible for framing diagnosis, the body
+/// does not. Debug traces are exactly what users paste into bug reports —
+/// they must never carry PINs or key material.
+pub(crate) fn dump_cmd(apdu: &[u8], sensitive: bool) -> String {
+    if !sensitive || apdu.len() <= 5 {
+        return hex_dump(apdu);
+    }
+    format!(
+        "{} [{} data bytes redacted]",
+        hex_dump(&apdu[..5]),
+        apdu.len() - 5
+    )
+}
+
+/// Molto2 commands whose data field must be redacted from `--debug` traces:
+/// `C5` set seed and `D7` set customer key carry SM4-ECB ciphertext that is
+/// trivially decryptable when the (public) default customer key is still in
+/// use, and `CE` answer-challenge pairs with the plaintext challenge from the
+/// preceding response to hand an offline brute-force oracle for the customer
+/// key.
+fn molto2_cmd_sensitive(apdu: &[u8]) -> bool {
+    matches!(apdu.get(1), Some(0xC5) | Some(0xD7) | Some(0xCE))
+}
+
+/// Hex-dump a response APDU for `--debug` traces, hiding the payload of
+/// responses that carry secrets (e.g. PSO:DECIPHER plaintext). The SW1/SW2
+/// trailer stays visible.
+pub(crate) fn dump_resp(resp: &[u8], sensitive: bool) -> String {
+    if !sensitive || resp.len() <= 2 {
+        return hex_dump(resp);
+    }
+    format!(
+        "[{} data bytes redacted] {}",
+        resp.len() - 2,
+        hex_dump(&resp[resp.len() - 2..])
+    )
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+
+    #[test]
+    fn sensitive_cmd_hides_body_keeps_header() {
+        // OpenPGP VERIFY PW1 with PIN "123456".
+        let apdu = [0x00, 0x20, 0x00, 0x81, 0x06, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36];
+        let dumped = dump_cmd(&apdu, true);
+        assert_eq!(dumped, "00 20 00 81 06 [6 data bytes redacted]");
+        assert!(!dumped.contains("31 32"));
+        // Non-sensitive commands and bodiless APDUs dump in full.
+        assert_eq!(dump_cmd(&apdu, false), hex_dump(&apdu));
+        let get_response = [0x00, 0xC0, 0x00, 0x00, 0x00];
+        assert_eq!(dump_cmd(&get_response, true), hex_dump(&get_response));
+    }
+
+    #[test]
+    fn sensitive_resp_hides_payload_keeps_sw() {
+        let resp = [0xDE, 0xAD, 0xBE, 0xEF, 0x90, 0x00];
+        assert_eq!(dump_resp(&resp, true), "[4 data bytes redacted] 90 00");
+        assert_eq!(dump_resp(&resp, false), hex_dump(&resp));
+        assert_eq!(dump_resp(&[0x90, 0x00], true), "90 00");
+    }
+
+    #[test]
+    fn molto2_secret_bearing_ins_flagged() {
+        for ins in [0xC5, 0xD7, 0xCE] {
+            assert!(molto2_cmd_sensitive(&[0x84, ins, 0x00, 0x00]));
+        }
+        assert!(!molto2_cmd_sensitive(&[0x80, 0x41, 0x00, 0x00, 0x00]));
+        assert!(!molto2_cmd_sensitive(&[]));
+    }
 }

@@ -13,7 +13,7 @@
 //! and [`clear_password`](OathSession::clear_password) — though Trussed devices
 //! (Solo 2 / Nitrokey 3) omit that handshake.
 
-use crate::{hex_dump, TransportError};
+use crate::{dump_cmd, dump_resp, TransportError};
 use keyroost_oath as oath;
 use pcsc::{Card, Context, Protocols, Scope, ShareMode};
 
@@ -189,16 +189,22 @@ impl OathSession {
     /// Transmit one APDU and reassemble a response the card splits across `61xx`
     /// continuations (`SEND_REMAINING`), returning `(payload, sw)`.
     fn transmit_full(&mut self, apdu: &[u8]) -> Result<(Vec<u8>, u16), TransportError> {
+        // PUT (01) carries the raw TOTP/HOTP seed; SET CODE (03) carries the
+        // password-equivalent access key. VALIDATE (A3) carries HMACs over
+        // known challenges in both directions — an offline brute-force oracle
+        // for the password — so its response chunks are redacted too.
+        let cmd_sensitive = matches!(apdu.get(1), Some(0x01) | Some(0x03) | Some(0xA3));
+        let resp_sensitive = apdu.get(1) == Some(&0xA3);
         let mut acc = Vec::new();
         let mut to_send = apdu.to_vec();
         loop {
             if self.debug {
-                eprintln!("> {:>14} >> {}", "oath", hex_dump(&to_send));
+                eprintln!("> {:>14} >> {}", "oath", dump_cmd(&to_send, cmd_sensitive));
             }
             let mut buf = [0u8; 4096];
             let resp = self.card.transmit(&to_send, &mut buf)?;
             if self.debug {
-                eprintln!("< {:>14} << {}", "oath", hex_dump(resp));
+                eprintln!("< {:>14} << {}", "oath", dump_resp(resp, resp_sensitive));
             }
             if resp.len() < 2 {
                 return Err(TransportError::ShortResponse {

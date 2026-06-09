@@ -10,7 +10,7 @@
 //! status view. Write operations (PUT DATA, key generation, PSO signing) and PIN
 //! verification are deliberately not implemented yet — see the byte-layer TODOs.
 
-use crate::{hex_dump, TransportError};
+use crate::{dump_cmd, dump_resp, TransportError};
 use keyroost_openpgp as pgp;
 use pcsc::{Card, Context, Protocols, Scope, ShareMode};
 
@@ -501,16 +501,23 @@ impl OpenPgpSession {
     /// Transmit one APDU and reassemble a response the card splits across `61xx`
     /// continuations (`GET RESPONSE`), returning `(payload, sw)`.
     fn transmit_full(&mut self, apdu: &[u8]) -> Result<(Vec<u8>, u16), TransportError> {
+        // VERIFY (20), CHANGE REFERENCE DATA (24), RESET RETRY COUNTER (2C)
+        // carry plaintext PINs; PUT DATA odd (DB) carries imported private
+        // keys. PSO:DECIPHER (2A 80 86) *responses* are the recovered
+        // plaintext — and so are the GET RESPONSE chunks that follow, hence
+        // the sticky flag for the whole reassembly loop.
+        let cmd_sensitive = matches!(apdu.get(1), Some(0x20) | Some(0x24) | Some(0x2C) | Some(0xDB));
+        let resp_sensitive = apdu.get(1..4) == Some(&[0x2A, 0x80, 0x86]);
         let mut acc = Vec::new();
         let mut to_send = apdu.to_vec();
         loop {
             if self.debug {
-                eprintln!("> {:>14} >> {}", "openpgp", hex_dump(&to_send));
+                eprintln!("> {:>14} >> {}", "openpgp", dump_cmd(&to_send, cmd_sensitive));
             }
             let mut buf = [0u8; 4096];
             let resp = self.card.transmit(&to_send, &mut buf)?;
             if self.debug {
-                eprintln!("< {:>14} << {}", "openpgp", hex_dump(resp));
+                eprintln!("< {:>14} << {}", "openpgp", dump_resp(resp, resp_sensitive));
             }
             if resp.len() < 2 {
                 return Err(TransportError::ShortResponse {

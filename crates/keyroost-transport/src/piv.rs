@@ -10,7 +10,7 @@
 //! write/auth surface (GENERAL AUTHENTICATE, key generation, certificate import,
 //! PIN/PUK/management-key management) is future work; see PLAN.md.
 
-use crate::{hex_dump, TransportError};
+use crate::{dump_cmd, hex_dump, TransportError};
 use keyroost_piv as piv;
 use pcsc::{Card, Context, Protocols, Scope, ShareMode};
 
@@ -162,11 +162,15 @@ impl PivSession {
     /// Transmit one APDU and reassemble a response the card splits across `61xx`
     /// continuations (GET RESPONSE), returning `(payload, sw)`.
     fn transmit_full(&mut self, apdu: &[u8]) -> Result<(Vec<u8>, u16), TransportError> {
+        // The read path doesn't send PINs yet, but redact the PIN-bearing
+        // instructions now so wiring up VERIFY (20) / CHANGE REFERENCE DATA
+        // (24) / RESET RETRY COUNTER (2C) later can't leak into traces.
+        let cmd_sensitive = matches!(apdu.get(1), Some(0x20) | Some(0x24) | Some(0x2C));
         let mut acc = Vec::new();
         let mut to_send = apdu.to_vec();
         loop {
             if self.debug {
-                eprintln!("> {:>14} >> {}", "piv", hex_dump(&to_send));
+                eprintln!("> {:>14} >> {}", "piv", dump_cmd(&to_send, cmd_sensitive));
             }
             let mut buf = [0u8; 4096];
             let resp = self.card.transmit(&to_send, &mut buf)?;
