@@ -39,6 +39,9 @@ p256 = { version = "0.13", default-features = false, features = ["arithmetic", "
 # OsRng for ephemeral keypair + AES IVs. p256 re-exports rand_core but the
 # OsRng inside it is gated behind rand_core's `getrandom` feature.
 rand_core = { version = "0.6", default-features = false, features = ["getrandom"] }
+# Already in the tree via p256/elliptic-curve; used to scrub shared secrets
+# and pinUvAuthTokens on drop (forbid(unsafe_code) rules out a manual wipe).
+zeroize = { version = "1", default-features = false }
 
 # Auto-select the hidapi I/O backend on macOS / Windows (Linux keeps the
 # dependency-free hidraw File backend).

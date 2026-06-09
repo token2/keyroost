@@ -634,7 +634,7 @@ struct OathAccess {
 
 impl OathAccess {
     /// Resolve the password from its env/stdin source, if one was given.
-    fn password(&self) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    fn password(&self) -> Result<Option<zeroize::Zeroizing<String>>, Box<dyn std::error::Error>> {
         if self.password_env.is_none() && !self.password_stdin {
             return Ok(None);
         }
@@ -2491,12 +2491,12 @@ fn gather_secret(
     cmd: &str,
     sources_hint: &str,
     supplied: Vec<(SecretEncoding, SecretSource)>,
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+) -> Result<zeroize::Zeroizing<Vec<u8>>, Box<dyn std::error::Error>> {
     if supplied.len() != 1 {
         return Err(format!("{} requires exactly one of {}", cmd, sources_hint).into());
     }
     let (encoding, source) = supplied.into_iter().next().unwrap();
-    let raw = match source {
+    let raw = zeroize::Zeroizing::new(match source {
         SecretSource::Literal(s) => s.to_owned(),
         SecretSource::Env(var) => {
             std::env::var(var).map_err(|_| format!("env var {} (for {}) is not set", var, cmd))?
@@ -2515,21 +2515,24 @@ fn gather_secret(
             stdin.lock().read_line(&mut line)?;
             line.trim_end_matches(['\r', '\n']).to_owned()
         }
-    };
-    Ok(match encoding {
+    });
+    Ok(zeroize::Zeroizing::new(match encoding {
         SecretEncoding::Hex => hex_decode(&raw)?,
         SecretEncoding::Base32 => base32_decode(&raw)?,
-        SecretEncoding::Ascii => raw.into_bytes(),
-    })
+        SecretEncoding::Ascii => raw.as_bytes().to_vec(),
+    }))
 }
 
+/// Returned wrapped in `Zeroizing` so the PIN/password is scrubbed from the
+/// heap when the caller's binding drops; `Deref` keeps call sites unchanged.
 fn read_secret(
     label: &str,
     env: Option<&str>,
     from_stdin: bool,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> Result<zeroize::Zeroizing<String>, Box<dyn std::error::Error>> {
     if let Some(var) = env {
         return std::env::var(var)
+            .map(zeroize::Zeroizing::new)
             .map_err(|_| format!("env var {} (for {}) is not set", var, label).into());
     }
     if from_stdin {
@@ -2547,7 +2550,9 @@ fn read_secret(
         }
         let mut line = String::new();
         stdin.lock().read_line(&mut line)?;
-        return Ok(line.trim_end_matches(['\r', '\n']).to_owned());
+        return Ok(zeroize::Zeroizing::new(
+            line.trim_end_matches(['\r', '\n']).to_owned(),
+        ));
     }
     Err(format!(
         "no source for {}: pass --{}env VAR or --{}stdin",

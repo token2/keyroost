@@ -1582,6 +1582,7 @@ dependencies = [
  "p256",
  "rand_core",
  "sha2",
+ "zeroize",
 ]
 
 [[package]]
@@ -1680,6 +1681,7 @@ dependencies = [
  "keyroost-resolve",
  "keyroost-rsakey",
  "keyroost-transport",
+ "zeroize",
 ]
 
 [[package]]

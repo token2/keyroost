@@ -6,22 +6,22 @@ done and committed on this branch.
 
 ## Phase 1 — CI / release pipeline (config-only)
 
-- [ ] Dependabot: add `cargo` ecosystem (currently only `github-actions`)
-- [ ] Release: emit `SHA256SUMS` alongside the archives
-- [ ] Release: GitHub artifact attestation (build provenance) on published archives
-- [ ] CI: `cargo audit` job (RUSTSEC advisories) on lockfile changes + weekly
+- [x] Dependabot: add `cargo` ecosystem (currently only `github-actions`)
+- [x] Release: emit `SHA256SUMS` alongside the archives
+- [x] Release: GitHub artifact attestation (build provenance) on published archives
+- [x] CI: `cargo audit` job (RUSTSEC advisories) on lockfile changes + weekly
 
 ## Phase 2 — CLI / GUI quick wins
 
-- [ ] Warn when programming Molto2 seeds under the factory-default customer key
-- [ ] `info`: warn when device clock drifts >30s from host (suggest `sync-time`)
-- [ ] GUI: clear the seed draft field after a successful write
-- [ ] GUI: auto-clear clipboard ~45s after copying an OTP code
+- [x] Warn when programming Molto2 seeds under the factory-default customer key
+- [x] `info`: warn when device clock drifts >30s from host (suggest `sync-time`)
+- [x] GUI: clear the seed draft field after a successful write
+- [x] GUI: auto-clear clipboard ~45s after copying an OTP code
 
 ## Phase 3 — memory hygiene round 2
 
-- [ ] Zeroize `PinUvAuthToken` and the CTAP shared secrets on drop
-- [ ] Zeroize CLI-side secret strings (`read_secret` / `gather_secret` returns)
+- [x] Zeroize `PinUvAuthToken` and the CTAP shared secrets on drop
+- [x] Zeroize CLI-side secret strings (`read_secret` / `gather_secret` returns)
 
 ## Phase 4 — documentation
 

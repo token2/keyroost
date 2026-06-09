@@ -129,6 +129,15 @@ pub struct PinUvAuthToken {
     pub token: Vec<u8>,
 }
 
+// The token is a session credential (it authorizes credential management on
+// the key until power-down); scrub it — and every clone — on drop.
+impl Drop for PinUvAuthToken {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.token.zeroize();
+    }
+}
+
 impl PinUvAuthToken {
     /// CTAP `pinUvAuthParam`: HMAC of `data` under the token. v1 truncates
     /// to 16 bytes, v2 returns the full 32-byte tag.

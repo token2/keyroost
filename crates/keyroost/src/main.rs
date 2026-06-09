@@ -3017,9 +3017,7 @@ impl eframe::App for App {
                 ctx.output_mut(|o| o.copied_text = " ".to_owned());
                 self.clipboard_clear_at = None;
             } else {
-                ctx.request_repaint_after(std::time::Duration::from_secs_f64(
-                    (t - now).max(0.1),
-                ));
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64((t - now).max(0.1)));
             }
         }
         // Apply any results from background device jobs before drawing.

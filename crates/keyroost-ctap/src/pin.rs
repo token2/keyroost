@@ -132,6 +132,23 @@ pub struct SharedSecretV2 {
     pub aes_key: [u8; 32],
 }
 
+// Session secrets shouldn't outlive their session in freed memory; each
+// clone scrubs itself independently on drop.
+impl Drop for SharedSecretV1 {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.0.zeroize();
+    }
+}
+
+impl Drop for SharedSecretV2 {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.hmac_key.zeroize();
+        self.aes_key.zeroize();
+    }
+}
+
 /// Behaviour common to the two PIN protocols. The two variants share the
 /// shape of `encrypt`/`decrypt`/`authenticate` but use different keys and
 /// IV strategies under the hood.
