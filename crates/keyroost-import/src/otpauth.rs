@@ -156,7 +156,11 @@ pub fn parse(uri: &str) -> Result<OtpAuth, OtpAuthError> {
 
     let secret_b32 = secret_b32.ok_or(OtpAuthError::MissingSecret)?;
     let secret = base32_decode(&secret_b32).map_err(|_| OtpAuthError::InvalidSecret)?;
-    if secret.is_empty() {
+    // The Molto2 caps seeds at 63 bytes, and the protocol layer asserts the
+    // same range; reject here so a malformed URI in an imported file fails
+    // with an error instead of panicking mid-import (after some slots were
+    // already written). Real TOTP secrets are 10–64 base32 chars (6–40 bytes).
+    if secret.is_empty() || secret.len() > 63 {
         return Err(OtpAuthError::InvalidSecret);
     }
 
@@ -306,6 +310,19 @@ mod tests {
     fn invalid_base32_secret() {
         let r = parse("otpauth://totp/x?secret=NOT_BASE32!!");
         assert!(matches!(r, Err(OtpAuthError::InvalidSecret)));
+    }
+
+    #[test]
+    fn oversized_secret_rejected() {
+        // 64 decoded bytes — one past the Molto2's 63-byte cap. Must error
+        // here rather than trip the protocol layer's assert mid-import.
+        let b32 = "A".repeat(103); // ceil(64*8/5) chars -> 64 bytes
+        let r = parse(&format!("otpauth://totp/x?secret={}", b32));
+        assert!(matches!(r, Err(OtpAuthError::InvalidSecret)));
+        // 63 bytes stays accepted.
+        let b32_ok = "A".repeat(101); // floor(63*8/5) chars -> 63 bytes
+        let p = parse(&format!("otpauth://totp/x?secret={}", b32_ok)).unwrap();
+        assert_eq!(p.secret.len(), 63);
     }
 
     #[test]
