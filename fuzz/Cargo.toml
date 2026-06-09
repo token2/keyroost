@@ -1,0 +1,75 @@
+# cargo-fuzz harness for the workspace's hand-rolled parsers — exactly the
+# code (vendored, no_std-ish, fed by files and devices) that fuzzing is for.
+# Lives in its own workspace (standard cargo-fuzz layout; the root excludes
+# it) so libfuzzer-sys and its nightly requirements never touch the main
+# dependency tree or release builds.
+#
+# Run locally with:  cargo +nightly fuzz run <target>   (from the repo root)
+[package]
+name = "keyroost-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+keyroost-proto = { path = "../crates/keyroost-proto" }
+keyroost-import = { path = "../crates/keyroost-import", features = ["bulk"] }
+keyroost-ctap = { path = "../crates/keyroost-ctap" }
+keyroost-oath = { path = "../crates/keyroost-oath" }
+keyroost-openpgp = { path = "../crates/keyroost-openpgp" }
+keyroost-piv = { path = "../crates/keyroost-piv" }
+
+[workspace]
+
+[[bin]]
+name = "otpauth"
+path = "fuzz_targets/otpauth.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bulk_import"
+path = "fuzz_targets/bulk_import.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "codec"
+path = "fuzz_targets/codec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cbor"
+path = "fuzz_targets/cbor.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "oath_parse"
+path = "fuzz_targets/oath_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "openpgp_parse"
+path = "fuzz_targets/openpgp_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "piv_parse"
+path = "fuzz_targets/piv_parse.rs"
+test = false
+doc = false
+bench = false

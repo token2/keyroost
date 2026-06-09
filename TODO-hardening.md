@@ -25,27 +25,27 @@ done and committed on this branch.
 
 ## Phase 4 — documentation
 
-- [ ] `SECURITY.md`: threat model, the no-network-access invariant, secret
+- [x] `SECURITY.md`: threat model, the no-network-access invariant, secret
       handling guarantees, disclosure process
-- [ ] README: document Windows elevation requirements for FIDO HID access
+- [x] README: document Windows elevation requirements for FIDO HID access
 
 ## Phase 5 — CLI features
 
-- [ ] `completions` subcommand (shell completions via clap_complete)
-- [ ] `manpage` subcommand (troff output via clap_mangen)
+- [x] `completions` subcommand (shell completions via clap_complete)
+- [x] `manpage` subcommand (troff output via clap_mangen)
 - [x] `import-file --dry-run`: print the slot/title/config plan without
       touching the device — *already existed upstream; verified working*
-- [ ] `doctor` subcommand: diagnose pcscd, readers, udev rules, hidraw
+- [x] `doctor` subcommand: diagnose pcscd, readers, udev rules, hidraw
       access, keys.json permissions
-- [ ] Destructive commands (`fido-reset`, `fido-creds-delete`,
+- [x] Destructive commands (`fido-reset`, `fido-creds-delete`,
       `factory-reset`): show the resolved friendly name + serial in the
       confirmation/refusal message
 
 ## Phase 6 — fuzzing
 
-- [ ] `fuzz/` crate with cargo-fuzz targets for the hand-rolled parsers:
+- [x] `fuzz/` crate with cargo-fuzz targets for the hand-rolled parsers:
       otpauth URI, base32, CBOR, OATH TLV, OpenPGP BER-TLV, PIV BER
-- [ ] Scheduled CI job running each target briefly (nightly toolchain)
+- [x] Scheduled CI job running each target briefly (nightly toolchain)
 
 ## Deferred — decisions or external work needed
 

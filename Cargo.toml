@@ -1,5 +1,8 @@
 [workspace]
 resolver = "2"
+# The cargo-fuzz harness is its own workspace so libfuzzer-sys (and its
+# nightly requirement) never enters the main dependency tree.
+exclude = ["fuzz"]
 members = [
     "crates/keyroost-proto",
     "crates/keyroost-transport",
