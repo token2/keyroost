@@ -28,7 +28,16 @@ updates:
         versions: ['>=0.2']
       - dependency-name: hmac
         versions: ['>=0.13']
+      - dependency-name: sha2
+        versions: ['>=0.11']
       # rsa 0.9 (keyroost-rsakey's scoped exception) requires the rand 0.8 /
       # rand_core 0.6 interfaces; drop when a rand-0.9+-compatible rsa ships.
       - dependency-name: rand
         versions: ['>=0.9']
+      # eframe pins its own egui version, so the pair can only move in
+      # lock-step, and a multi-version egui jump needs hand-migration of the
+      # GUI code — an upgrade to do deliberately, not via single-crate bumps.
+      - dependency-name: eframe
+        versions: ['>=0.30']
+      - dependency-name: egui
+        versions: ['>=0.30']
