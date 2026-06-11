@@ -111,29 +111,64 @@ pub fn entries_from_image(bytes: &[u8]) -> Result<QrImport, QrError> {
         batch: None,
     };
     let mut any_otpauth = false;
+    // A malformed payload must not abort the whole image: a screenshot can
+    // hold several QR codes and one damaged code shouldn't discard the
+    // accounts decoded from the others. Failures only become the result
+    // when no payload in the image yielded anything.
+    let mut payload_err: Option<String> = None;
+    let mut any_parsed = false;
     for text in &texts {
         if migration::is_migration_uri(text) {
             any_otpauth = true;
-            let m = migration::parse(text).map_err(|e| QrError::Payload(e.to_string()))?;
-            import.entries.extend(m.entries);
-            import.skipped.extend(m.skipped);
-            import.batch = import.batch.or(m.batch);
+            match migration::parse(text) {
+                Ok(m) => {
+                    any_parsed = true;
+                    import.entries.extend(m.entries);
+                    import.skipped.extend(m.skipped);
+                    import.batch = import.batch.or(m.batch);
+                }
+                Err(e) => {
+                    payload_err.get_or_insert(e.to_string());
+                    import.skipped.push(migration::Skipped {
+                        label: "damaged QR code".into(),
+                        reason: "payload could not be parsed",
+                    });
+                }
+            }
         } else if text.trim_start().starts_with("otpauth://") {
             any_otpauth = true;
-            let parsed: OtpAuth = keyroost_import::parse_otpauth(text.trim())
-                .map_err(|e| QrError::Payload(e.to_string()))?;
-            import.entries.push(BulkEntry {
-                issuer: parsed.issuer,
-                account: parsed.account,
-                secret: parsed.secret,
-                algorithm: parsed.algorithm,
-                digits: parsed.digits,
-                time_step: parsed.time_step,
-            });
+            match keyroost_import::parse_otpauth(text.trim()) {
+                Ok(parsed) => {
+                    let parsed: OtpAuth = parsed;
+                    any_parsed = true;
+                    import.entries.push(BulkEntry {
+                        issuer: parsed.issuer,
+                        account: parsed.account,
+                        secret: parsed.secret,
+                        algorithm: parsed.algorithm,
+                        digits: parsed.digits,
+                        time_step: parsed.time_step,
+                    });
+                }
+                Err(e) => {
+                    payload_err.get_or_insert(e.to_string());
+                    import.skipped.push(migration::Skipped {
+                        label: "damaged QR code".into(),
+                        reason: "payload could not be parsed",
+                    });
+                }
+            }
         }
     }
     if !any_otpauth {
         return Err(QrError::NotOtpauth);
+    }
+    if !any_parsed {
+        if let Some(e) = payload_err {
+            // Every otpauth payload in the image was unreadable — surface
+            // the first underlying error instead of an empty success.
+            return Err(QrError::Payload(e));
+        }
     }
     Ok(import)
 }

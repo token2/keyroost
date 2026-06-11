@@ -230,13 +230,15 @@ impl Keyring {
             Ok(s) => {
                 let mut ring: Keyring =
                     serde_json::from_str(&s).map_err(|e| KeyringError::Parse(e.to_string()))?;
-                // `add` validates names before they ever reach disk, so
-                // re-validate on the way back in: a hand-edited file could
-                // otherwise inject ANSI escape sequences that get echoed to
-                // the terminal in error messages and listings. Free-text
-                // fields are sanitized rather than rejected.
+                // `add` validates names before they ever reach disk; on the
+                // way back in every field — including the name — is sanitized
+                // rather than rejected. Rejecting would make one hand-edited
+                // entry render the whole registry unloadable, and callers
+                // that fall back to an empty registry on error would then
+                // overwrite keys.json and destroy every other entry on the
+                // next save.
                 for entry in &mut ring.keys {
-                    validate_name(&entry.name)?;
+                    strip_control_chars(&mut entry.name);
                     strip_control_chars(&mut entry.serial);
                     for field in [&mut entry.vendor, &mut entry.aaguid, &mut entry.note]
                         .into_iter()
@@ -475,18 +477,22 @@ mod tests {
     }
 
     #[test]
-    fn load_rejects_invalid_names_and_strips_control_chars() {
+    fn load_sanitizes_invalid_names_and_strips_control_chars() {
         let dir = std::env::temp_dir().join(format!("keyroost-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("keys.json");
 
-        // A name with an ANSI escape must fail validation on load.
+        // A name with an ANSI escape is sanitized, not fatal: one bad
+        // hand-edited entry must never make the whole registry unloadable
+        // (an unwrap_or_default + save would wipe every other entry).
         std::fs::write(
             &path,
-            "{\"keys\":[{\"name\":\"evil\\u001b[31m\",\"serial\":\"S1\"}]}",
+            "{\"keys\":[{\"name\":\"evil\\u001b[31m\",\"serial\":\"S1\"},{\"name\":\"good\",\"serial\":\"S2\"}]}",
         )
         .unwrap();
-        assert!(Keyring::load_from(&path).is_err());
+        let k = Keyring::load_from(&path).unwrap();
+        assert_eq!(k.keys[0].name, "evil[31m");
+        assert_eq!(k.keys[1].name, "good");
 
         // Control chars in free-text fields are stripped, not fatal.
         std::fs::write(

@@ -12,11 +12,17 @@
 # instead of relying on group membership.
 
 # Generic FIDO/U2F devices matched by HID usage page (0xF1D0) — works for any
-# vendor as long as their report descriptor follows the spec. systemd's hwdb
-# sets ID_SECURITY_TOKEN=1 from the usage page; matching on it (rather than
-# bInterfaceClass=="03", which is *every* HID device) keeps keyboard/mouse
-# hidraw nodes from becoming user-accessible — raw read access to a keyboard
-# node is a keylogger.
+# vendor as long as their report descriptor follows the spec. systemd-udevd's
+# fido_id builtin (60-fido-id.rules, systemd v244+) sets ID_SECURITY_TOKEN=1
+# from the usage page; matching on it (rather than bInterfaceClass=="03",
+# which is *every* HID device) keeps keyboard/mouse hidraw nodes from
+# becoming user-accessible — raw read access to a keyboard node is a
+# keylogger.
+#
+# Caveat: on non-systemd udev (eudev — Alpine, Devuan, some Gentoo) fido_id
+# never runs, so this generic rule matches nothing and only the explicit
+# vendor rules below apply. Keys from other vendors on such systems need
+# their own vendor-ID rule added here.
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", \
     ENV{ID_SECURITY_TOKEN}=="1", \
     TAG+="uaccess", GROUP="plugdev", MODE="0660"

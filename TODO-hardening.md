@@ -22,6 +22,9 @@ done and committed on this branch.
 
 - [x] Zeroize `PinUvAuthToken` and the CTAP shared secrets on drop
 - [x] Zeroize CLI-side secret strings (`read_secret` / `gather_secret` returns)
+- [ ] Zeroize imported TOTP seeds: `BulkEntry.secret`, the decrypted Aegis
+      vault plaintext, and GA migration entry buffers currently drop without
+      wiping (SECURITY.md is scoped to match until this lands)
 
 ## Phase 4 — documentation
 
@@ -57,8 +60,9 @@ index propagation:
 
 1. `keyroost-proto`, `keyroost-hid`, `keyroost-keyring`, `keyroost-rsakey`
 2. `keyroost-ctap`, `keyroost-oath`, `keyroost-openpgp`, `keyroost-piv`,
-   `keyroost-import`, `keyroost-resolve`
-3. `keyroost-qr`, `keyroost-transport`
+   `keyroost-import`
+3. `keyroost-transport` (needs proto/oath/openpgp/piv), then
+   `keyroost-resolve` (needs transport) and `keyroost-qr` (needs import)
 4. `keyroostctl`, `keyroost`
 
 Afterwards `cargo install keyroostctl` / `cargo install keyroost` work for
@@ -78,6 +82,17 @@ anyone with the Linux build prerequisites from the README.
 - [ ] **Branch/tag protection** — repo settings, must be done in the GitHub
       UI by an admin: protect `main` (require PR + green CI), protect `v*`
       tags (maintainers only; tag push is release authority).
+- [ ] **GUI: move slow imports off the frame loop** — QR image decode and
+      Aegis scrypt decryption run synchronously inside `update()`, freezing
+      the window (seconds for a stock vault, minutes at the scrypt caps);
+      route through the existing job mechanism, mindful that the worker
+      thread serializes device I/O.
+- [ ] **Wayland clipboard clear** — the conditional clear reads via
+      arboard's X11 backend; on pure-Wayland sessions without XWayland
+      clipboard sync it fails open and never clears. No complete fix known
+      (wl-data-control is wlroots-only); document or detect.
+- [ ] **CI cache for fuzz/audit jobs** — both `cargo install` cargo-fuzz /
+      cargo-audit from source every run; cache the binaries.
 - [x] **Clipboard conditional clear** — done via arboard (already in the
       tree through eframe): clears only when the clipboard still holds the
       copied code; fails open if unreadable.

@@ -1351,7 +1351,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 for s in &import.skipped {
                     eprintln!("skipped {:?}: {}", s.label, s.reason);
                 }
+                // A GA export can span several QR images; a clean single-slot
+                // import of QR 1 must not read as "migration complete".
+                if let Some((i, n)) = import.batch {
+                    eprintln!(
+                        "note: this is QR {} of {} in the export — import the other images too",
+                        i + 1,
+                        n
+                    );
+                }
                 match import.entries.len() {
+                    0 => {
+                        return Err(
+                            "QR decoded, but no account could be imported (see skips above)"
+                                .into(),
+                        )
+                    }
                     1 => import.entries.into_iter().next().unwrap(),
                     n => {
                         return Err(format!(
