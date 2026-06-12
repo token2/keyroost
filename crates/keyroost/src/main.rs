@@ -3589,6 +3589,12 @@ impl App {
                             // scrolls instead of clipping at the window edge.
                             // Salted per tab so each pane keeps its own
                             // scroll position.
+                            //
+                            // Solid bar style: reserve a real gutter for the
+                            // scrollbar instead of floating it over the cards'
+                            // right edge (the floating bar sat on top of card
+                            // borders and the panes' top-right action buttons).
+                            ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
                             egui::ScrollArea::vertical()
                                 .id_salt(("cap-pane", self.cap_tab as u8))
                                 .auto_shrink([false, false])
