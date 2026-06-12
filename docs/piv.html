@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PIV — smart-card certificates &amp; keys — keyroost</title>
-<meta name="description" content="What PIV (NIST SP 800-73) is, the four common key slots (9A/9C/9D/9E), how it's used for SSH/VPN/login/signing, and what keyroost currently reads.">
+<meta name="description" content="What PIV (NIST SP 800-73) is, the four common key slots (9A/9C/9D/9E), the PIN/PUK/management-key model, and how keyroost manages keys, certificates, and PINs — including on-card self-signed certificates and CSRs.">
 <link rel="stylesheet" href="assets/keyroost-theme.css">
 <link rel="stylesheet" href="assets/site.css">
 <script>(function(){try{var t=localStorage.getItem('kr-theme');if(t==='light'||(!t&&window.matchMedia&&matchMedia('(prefers-color-scheme: light)').matches))document.documentElement.setAttribute('data-theme','light');}catch(e){}})();</script>
@@ -65,17 +65,37 @@
         counters and the card must be reset, erasing its keys and certs.
         <a href="reset.html">See resetting →</a></p>
     </div>
+    <div class="kr-callout note">
+      <div class="kr-callout-title note">The management key</div>
+      <p>Separate from the PIN, a third credential — the <em>management key</em> — gates
+        administrative changes: generating keys, importing certificates, and changing retry
+        counts. Cards ship with a well-known factory default
+        (<code>010203…0708</code>, repeated to fill the key), so anyone can administer a
+        fresh card. If you rely on PIV day-to-day, change it — keyroost can rotate it to a
+        random value you keep somewhere safe (a password manager). Lose a changed key and
+        no admin changes are possible until a full applet reset.</p>
+    </div>
   </section>
 
   <section class="kr-section">
     <h2>What keyroost does with PIV</h2>
     <div class="kr-tool">
       <span class="kr-mark mono">k</span>
-      <p><strong>Read-only today.</strong> keyroost reports the PIV applet/firmware version,
-        serial, PIN retry count, and which of the <code>9A/9C/9D/9E</code> slots currently
-        hold a certificate — a safe, no-PIN status view. Write operations aren't implemented.</p>
+      <p><strong>Full management.</strong> Status (version, serial, PIN retries, slot
+        contents) needs no PIN. Beyond that, keyroost generates keys on the card
+        (RSA&nbsp;1024–4096, ECC&nbsp;P-256/P-384, Ed25519), creates a
+        <strong>self-signed certificate</strong> in the slot or a <strong>certificate
+        request (CSR)</strong> for a certificate authority — signed by the card itself, the
+        private key never leaves it — imports and exports certificates, changes the PIN,
+        PUK, retry counts and management key, and resets the applet. The same controls are
+        in the desktop app's PIV pane.</p>
     </div>
-<pre><code>keyroostctl piv status --reader yubikey</code></pre>
+<pre><code>keyroostctl piv status
+keyroostctl piv generate-key --slot 9a --algorithm eccp256 --mgmt-key-stdin
+keyroostctl piv self-sign --slot 9a --subject "CN=Alice" --days 365 \
+    --pin-stdin --mgmt-key-stdin
+keyroostctl piv request-cert --slot 9a --subject "CN=Alice,O=Example" \
+    --pin-stdin --file request.csr</code></pre>
   </section>
 
   <section class="kr-section kr-res-section">
