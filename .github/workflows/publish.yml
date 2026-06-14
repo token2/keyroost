@@ -87,7 +87,12 @@ jobs:
                        keyroost-ctap keyroost-oath keyroost-openpgp keyroost-piv \
                        keyroost-import keyroost-transport keyroost-resolve keyroost-qr \
                        keyroostctl keyroost; do
-            if curl -fsSL "https://crates.io/api/v1/crates/${crate}/${version}" >/dev/null 2>&1; then
+            # crates.io rejects API requests without a User-Agent (HTTP 403),
+            # which would make this "already published?" probe always fail and
+            # then try to republish an existing version (a hard error). Send a
+            # descriptive UA so the 200/404 distinction is real.
+            if curl -fsSL -H "User-Agent: keyroost-release (https://github.com/framefilter/keyroost)" \
+                 "https://crates.io/api/v1/crates/${crate}/${version}" >/dev/null 2>&1; then
               echo "${crate} ${version} already on crates.io — skipping"
               continue
             fi
