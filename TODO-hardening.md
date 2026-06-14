@@ -61,8 +61,9 @@ index propagation:
 
 1. `keyroost-proto`, `keyroost-hid`, `keyroost-keyring`, `keyroost-rsakey`
 2. `keyroost-ctap`, `keyroost-oath`, `keyroost-openpgp`, `keyroost-piv`,
+   `keyroost-token2otp` (all leaf byte layers — no in-workspace deps),
    `keyroost-import`
-3. `keyroost-transport` (needs proto/oath/openpgp/piv), then
+3. `keyroost-transport` (needs proto/oath/openpgp/piv/token2otp), then
    `keyroost-resolve` (needs transport) and `keyroost-qr` (needs import)
 4. `keyroostctl`, `keyroost`
 
