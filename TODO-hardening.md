@@ -131,10 +131,48 @@ PIN+ then a PIN+R3 "3.2 mini" both mis-seen as a Molto2). v0.5.1 stopped the
 bleed by matching only the "molto" product word; v0.6.0 replaces name-matching
 with stable identifiers.
 
-### Phase 0 — Command-surface inventory (do first; read-only)
-Enumerate every `keyroostctl` command from clap, map each to the user task it
-serves, flag dead / duplicated / confusing commands. Grounds every later
-decision. Produce as the first artifact.
+### Phase 0 — Command-surface inventory (DONE 2026-06-14; read-only)
+Enumerated every `keyroostctl` command from clap: **61 leaf commands across 8
+domains** + the bare invocation + 8 global flags. Map and findings below; the
+two breaking-rename decisions it surfaced are recorded under Phase 3.
+
+Surface (leaf-command counts):
+- **Global/utility (5):** *(bare)* → currently Molto2 `info`, `info`, `list`,
+  `doctor`, `completions`/`manpage`.
+- **Molto2 (flat, 10):** info, set-seed, set-title, configure, sync-time,
+  set-customer-key, import, import-file, probe, factory-reset.
+- **FIDO (flat, 8):** fido-info, fido-reset, fido-pin-retries, fido-pin-set,
+  fido-pin-change, fido-creds-metadata, fido-creds-list, fido-creds-delete.
+- **key-name (nested, 3):** add, list, remove.
+- **oath (nested, 6):** list, code, add, delete, set-password, clear-password
+  *(Yubico/Trussed applet)*.
+- **openpgp (nested, 10):** status, verify, public-key, reset, set-name,
+  set-url, generate-key, import-key, sign, decrypt.
+- **piv (nested, 12):** status, change-pin, change-puk, unblock-pin,
+  set-retries, change-management-key, generate-key, import-cert, export-cert,
+  request-cert, self-sign, reset.
+- **otp (nested, 8):** list, get, add, delete, erase-all, serial, button-hotp,
+  delete-button-hotp *(Token2 OTP-on-FIDO)*.
+
+Findings:
+1. **Three command shapes coexist** — Molto2 flat+un-namespaced (`set-seed`),
+   FIDO flat+prefixed (`fido-creds-list`), the rest nested (`piv status`).
+   Nothing tells a reader `set-seed` is Molto2-only.
+2. **Four device-targeting idioms, none unified** — Molto2 implicit-single,
+   FIDO `--path` (hidraw), OATH/OpenPGP/PIV `--reader <substr>` (PC/SC), OTP
+   `--transport`. The friendly-name `--name` feeds **only** FIDO resolution, so
+   a named key can't be targeted for piv/oath/openpgp. Real gap, not cosmetic.
+3. **Secret-input flags re-declared per variant** — `<noun>-env`/`<noun>-stdin`
+   is consistent but only OATH flattens it (`OathAccess`); OpenPGP and PIV
+   repeat `--reader` + PIN flags inline everywhere. Dedup target for Phase 3.
+4. **Verb drift** — "set" vs "change" for the same act; "reset" in four places.
+5. **Confusable twins** — `oath`(Yubico) vs `otp`(Token2); `info` ≡ bare;
+   `list` overlaps `key-name list`.
+6. **`probe`** is a bring-up/research tool living in the main user surface —
+   hide it (`#[command(hide = true)]` or a `dev`/`debug` namespace).
+7. **No `--json` anywhere** — all human-text (→ Phase 4).
+8. Bare-invocation Molto2-default confirmed at `main.rs:1411` (`Session::open`
+   → `read_info`) — the `SW=6A81` wart, retired in Phase 2.
 
 ### Phase 1 — Shared device model
 Lift the device-correlation logic (HID↔PC/SC pairing, capability union,
@@ -158,11 +196,24 @@ next bug report hands us what My1's did, by design). Bare invocation rewired
 exactly once, straight to the friendly form (no interim raw-list step).
 
 ### Phase 3 — Consistency pass (the breaking part)
-Unify command shape: FIDO is flat (`fido-creds-list`) while OATH/OpenPGP/PIV/OTP
-are nested (`piv status`). Pick one — lean nested `fido <sub>` for symmetry —
-and align verb/noun naming across all groups. Dedup shared plumbing: secret
-input (env/stdin), reader resolution, session-open-and-announce — extend the
-existing `open_piv` / `open_openpgp` helper pattern to FIDO / OATH / Molto2.
+**Decisions (locked from Phase 0, 2026-06-14):**
+- **Nest every device under a named group.** FIDO flat → `fido <sub>`, *and*
+  Molto2 flat → `molto <sub>` (full symmetry — every device is a group; the
+  bare invocation is the only top-level entry that touches a device). So:
+  `molto set-seed`, `fido creds list`, `piv status`, `oath list`, `otp list`.
+  Top level keeps only the device-agnostic utilities (bare overview, `list`,
+  `doctor`, `completions`, `manpage`) + the group names.
+- **Unify device targeting fully.** One resolution path: `--name` (friendly)
+  works for **every** group; `--reader <substr>` / `--path` / `--transport`
+  become aliases/inputs into that one resolver (built on the Phase 1 shared
+  device model), not parallel idioms. `--key*` stays Molto2-scoped.
+
+Also: align verb/noun naming across groups ("set" vs "change"; the four
+`reset`s become `<group> reset`), hide `probe` from the main surface, and dedup
+shared plumbing — secret input (env/stdin), device resolution,
+session-open-and-announce — extend the existing `open_piv` / `open_openpgp`
+helper pattern to FIDO / OATH / Molto2 / OTP. Land all renames in one change
+with a clear migration note (old → new command map).
 
 ### Phase 4 — Feature gaps
 Per-device parity audit (esp. the Token2 OTP CLI merged in #24 — confirm it
