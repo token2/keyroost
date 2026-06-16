@@ -239,7 +239,10 @@ Also: align verb/noun naming across groups ("set" vs "change"; the four
 shared plumbing — secret input (env/stdin), device resolution,
 session-open-and-announce — extend the existing `open_piv` / `open_openpgp`
 helper pattern to FIDO / OATH / Molto2 / OTP. Land all renames in one change
-with a clear migration note (old → new command map).
+with a clear migration note (old → new command map). The README and every
+`docs/*.html` page document the *current* flat surface, so they go stale the
+instant these renames land — they must be updated in the same change (Phase 6),
+not after.
 
 ### Phase 4 — Feature gaps
 Per-device parity audit (esp. the Token2 OTP CLI merged in #24 — confirm it
@@ -252,7 +255,33 @@ Fresh per-device end-to-end pass on available hardware (YubiKey, Solo 2,
 Molto2; Token2 FIDO via the vendor / @My1). The bare-invocation "is the device
 plugged in?" wart is retired here as a side effect of Phase 2.
 
+### Phase 6 — Documentation sync (ships with the release, not after)
+The user-facing docs currently describe an incomplete, soon-to-change product;
+bring them level with reality before tagging. Concretely:
+- **README is stale on Token2.** The "What it does" list, the "Supported
+  devices" table, the Quick-start examples, and the GUI-tabs line all still
+  frame the project around the Molto2 ("The original target") and omit the
+  **Token2 FIDO security keys (T2F2 / PIN+)** entirely — even though on-device
+  TOTP/HOTP for them shipped in 0.5.0 (the `otp` group) and #27 adds OTP over
+  CCID, an interface enable/disable command, full-serial read, and a touch-HOTP
+  GUI dialog. Add the device, its capabilities, and `otp` examples; the
+  Contributors note already acknowledges the feature, so the body contradicts
+  itself today.
+- **Every command example must follow the Phase 3 renames.** README Quick-start
+  + all `docs/*.html` use the flat `fido-*` commands and the bare-Molto2 `info` /
+  `import` form; after Phase 3 these become `fido …` and `molto …`. Sweep
+  `README.md`, `fido2.html`, `reset.html`, `molto2.html`, `index.html` (the
+  already-nested `oath` / `openpgp` / `piv` / `key-name` examples are unaffected).
+- **Migration note** (old → new command map) lands in the README and/or
+  `CHANGELOG.md [0.6.0]`.
+- **CHANGELOG `[0.6.0]`** entry written; **workspace version bumped** to 0.6.0
+  (the branch does not bump it yet — still 0.5.1).
+- The GitHub Pages site is served from `docs/` on `main`, so it goes live the
+  moment this merges — there is no separate publish step to catch a lag.
+
 ### Sequencing
 Phases 0–2 are additive/safe; Phase 3 is where breaking renames land — keep
-them in one change with a clear migration note. Ship v0.6.0 once all five are
-done and walked through on hardware.
+them in one change with a clear migration note, and update the docs (Phase 6) in
+that same change so the site never serves stale command syntax. Ship v0.6.0 only
+once all phases are done, the docs are synced, the version is bumped, and the
+release is walked through on hardware.
