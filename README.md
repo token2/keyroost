@@ -36,7 +36,7 @@ a short, vendor-neutral tour of what FIDO2, OATH, OpenPGP, and PIV actually do.
 - **Token2 Molto2 / Molto2v2** — program a slot from an `otpauth://` URI;
   bulk-import from Aegis (plaintext or encrypted), 2FAS, or a list of `otpauth://`
   URIs; sync the host clock; rotate the customer key; factory reset.
-- **Token2 on-device OTP (T2F2 / PIN+ FIDO keys)** — store TOTP/HOTP credentials
+- **Token2 on-device OTP (PIN+ Series FIDO keys)** — store TOTP/HOTP credentials
   directly on a Token2 FIDO security key and read their codes over USB-HID, NFC,
   or CCID; configure the single HOTP-on-touch keystroke slot; read the serial;
   and enable / disable the key's USB interfaces (FIDO / keyboard-HID / CCID).
@@ -50,7 +50,7 @@ a short, vendor-neutral tour of what FIDO2, OATH, OpenPGP, and PIV actually do.
 | Device | Capabilities | Notes |
 |---|---|---|
 | **Token2 Molto2 / Molto2v2** | TOTP slot programming | The original target. |
-| **Token2 T2F2 / PIN+** | FIDO2, on-device OTP (TOTP/HOTP) | OTP applet over USB-HID / NFC / CCID; contributed by [@token2](https://github.com/token2). |
+| **Token2 PIN+ Series** | FIDO2, OTP, OpenPGP, PIV | On-device OTP (TOTP/HOTP, incl. HID/keyboard HOTP) over USB-HID / NFC / CCID; OpenPGP + PIV applets per Token2. Contributed by [@token2](https://github.com/token2). |
 | **YubiKey** (5 series) | FIDO2, OATH, OpenPGP, PIV | Built and verified against a YubiKey 5.7. |
 | **SoloKeys Solo 2** | FIDO2, OATH | Trussed firmware; no OpenPGP applet. |
 | **Nitrokey 3** | FIDO2, OATH | Shares the Solo 2 / Trussed stack. |
@@ -214,7 +214,7 @@ keyroostctl info
 keyroostctl import --profile 0 'otpauth://totp/GitHub:me@x.com?secret=JBSWY3DPEHPK3PXP'
 keyroostctl import-file ~/Downloads/aegis.json --start 0 --dry-run   # validate first
 
-# --- Token2 on-device OTP (T2F2 / PIN+ FIDO keys) ---
+# --- Token2 on-device OTP (PIN+ Series FIDO keys) ---
 keyroostctl otp list
 keyroostctl otp add GitHub me@x.com --seed-stdin    # base32 seed from stdin, never argv
 keyroostctl otp get GitHub me@x.com
