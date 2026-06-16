@@ -6,6 +6,75 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-06-14
+
+A follow-up to the Token2-vs-Molto2 device-identification fix.
+
+### Fixed
+- Molto2 reader matching keys on the product-name word only ("molto"), not the
+  broader Token2 brand string, so a Token2 PIN+ / FIDO2 key is no longer
+  mis-detected as a Molto2 (#21).
+
+## [0.5.0] - 2026-06-14
+
+On-device OTP for Token2 FIDO security keys joins the Molto2 programmer.
+
+### Added
+- **On-device TOTP/HOTP for Token2 FIDO keys (PIN+ / FIDO2+)** — a pure-Rust
+  byte/codec layer (`keyroost-token2otp`) plus CLI (`otp` group) and GUI surface
+  to enumerate, read, add, and delete OTP credentials stored on a Token2 FIDO
+  security key over USB-HID, including the touch/button-HOTP slot and serial
+  read. Contributed by @token2, built from the protocol reference they published
+  (#20).
+
+### Fixed
+- Token2 FIDO keys no longer masquerade as a ghost Molto2 during device
+  enumeration (#21).
+- The crates.io "already published?" probe now sends a User-Agent, which some
+  endpoints require.
+
+### Docs
+- Credit @token2 in a Contributors acknowledgement.
+
+## [0.4.0] - 2026-06-12
+
+Full PIV management, screenshot QR import, package-manager distribution, a
+fuzzing suite, and a broad security-hardening pass.
+
+### Added
+- **Full PIV management** — beyond read-only status: client/card authentication
+  (GENERAL AUTHENTICATE), key generation, certificate import/export,
+  PIN/PUK/management-key changes, and applet reset, plus card-signed
+  certificates (self-sign into a slot, or emit a CSR for a CA).
+- **QR-code import** — pull 2FA secrets from PNG/JPEG screenshots, including
+  Google Authenticator export batches.
+- **Package-manager distribution** — automated release fanout to crates.io, AUR,
+  Homebrew, and winget; `cargo binstall` targets the attested release archives.
+- **Fuzzing** — `cargo-fuzz` targets for every hand-rolled parser, run weekly in
+  CI.
+- **`doctor`, `completions`, and `manpage` subcommands** — environment diagnosis
+  and generated shell-completion / man-page artifacts.
+- **Supply-chain CI** — a `cargo audit` (RUSTSEC) job on lockfile changes and
+  weekly, SHA-256 release checksums, and build-provenance attestation on
+  published archives.
+- **SECURITY.md** — threat model, security invariants, and disclosure policy.
+
+### Changed
+- GUI bulk imports run on a dedicated thread instead of the frame loop, and a
+  single shared scroller backs every capability pane.
+
+### Fixed
+- Broad post-review hardening: zeroize session secrets, CLI-read PINs, imported
+  TOTP seeds, and extracted RSA components on drop; bound device-driven loops
+  and lengths; strict base32 padding; cap attacker-controlled scrypt parameters
+  in encrypted Aegis vaults; reject `otpauth` secrets over the device's 63-byte
+  cap at parse time; atomic owner-only `keys.json` writes with field
+  sanitization; redact secret-bearing APDU bodies from `--debug` traces.
+
+### Notes
+- The crates.io fanout skips publishing until OIDC / trusted-publishing is
+  configured; the other targets and the GitHub Release run unconditionally.
+
 ## [0.3.0] - 2026-06-08
 
 keyroost goes cross-platform: macOS and Windows join Linux, with a HID backend
@@ -120,7 +189,10 @@ multi-vendor hardware-security-key manager, then took its neutral name. Highligh
   external dependencies are `pcsc`, `clap`, `eframe`/`egui`, `serde`, and
   (for RSA keygen/parsing) `rsa`/`rand`.
 
-[Unreleased]: https://github.com/framefilter/keyroost/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/framefilter/keyroost/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/framefilter/keyroost/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/framefilter/keyroost/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/framefilter/keyroost/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/framefilter/keyroost/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/framefilter/keyroost/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/framefilter/keyroost/releases/tag/v0.1.0
