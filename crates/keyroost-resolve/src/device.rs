@@ -34,7 +34,7 @@ impl Caps {
 
 /// What kind of physical device this is. `Token` is the Molto2 family; everything
 /// else is a `Key`.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeviceKind {
     Key,
     Token,
@@ -113,9 +113,202 @@ fn clean_model(raw: &str, vendor: &str) -> String {
     if out.is_empty() { vendor.to_string() } else { out }
 }
 
-pub fn correlate(_hids: &[HidDevice], _probes: &[ReaderProbe], _keyring: &Keyring) -> Vec<Device> {
-    Vec::new()
+/// True when some FIDO HID node shares this reader's USB topology (bus+address) —
+/// i.e. they are the same physical device. Used to keep a Token2 *FIDO key* from
+/// ever being classified as a Molto2 (the Molto2 has no FIDO HID interface).
+fn has_fido_hid_sibling(p: &ReaderProbe, hids: &[&HidDevice]) -> bool {
+    match (p.usb_bus, p.usb_address) {
+        (Some(bus), Some(addr)) => hids
+            .iter()
+            .any(|h| h.usb_bus == Some(bus) && h.usb_address == Some(addr)),
+        _ => false,
+    }
 }
+
+/// Correlate FIDO-HID nodes and PC/SC reader probes into one device per physical
+/// key. Pure: all I/O is done by the caller ([`enumerate`]). The `hids` slice may
+/// contain non-FIDO nodes; they are filtered here.
+pub fn correlate(hids: &[HidDevice], probes: &[ReaderProbe], keyring: &Keyring) -> Vec<Device> {
+    let hids: Vec<&HidDevice> = hids.iter().filter(|h| h.is_fido()).collect();
+
+    let yk_readers: Vec<YubiKeyCcid> = probes
+        .iter()
+        .filter(|p| !p.is_molto2)
+        .map(|p| YubiKeyCcid {
+            reader_name: p.reader_name.clone(),
+            usb_bus: p.usb_bus,
+            usb_address: p.usb_address,
+            serial: p.yubikey_serial.clone(),
+        })
+        .collect();
+
+    let serials: Vec<Option<String>> = hids
+        .iter()
+        .map(|h| {
+            h.serial_number
+                .clone()
+                .or_else(|| crate::ccid_serial_for(h, &yk_readers))
+        })
+        .collect();
+
+    let mut devices: Vec<Device> = Vec::new();
+
+    // --- 1. Molto2 tokens — only when there is NO FIDO HID sibling (#21 guard).
+    for p in probes
+        .iter()
+        .filter(|p| p.is_molto2 && !has_fido_hid_sibling(p, &hids))
+    {
+        let serial = p.serial.clone().unwrap_or_default();
+        let mut caps = Caps::default();
+        caps.insert(Caps::TOTP);
+        devices.push(Device {
+            id: format!("molto:{}", p.reader_name),
+            name: keyring.name_for(Some(&serial)).map(str::to_owned),
+            vendor: "Token2".into(),
+            model: "Molto2".into(),
+            serial,
+            transport: "USB · PC/SC".into(),
+            firmware: String::new(),
+            caps,
+            kind: DeviceKind::Token,
+            hid_path: None,
+            reader: Some(p.reader_name.clone()),
+        });
+    }
+
+    // --- 2. Smart-card keys, one per non-Molto reader that answers an applet.
+    for p in probes.iter().filter(|p| !p.is_molto2) {
+        let mut caps = Caps::default();
+        if p.has_oath { caps.insert(Caps::OATH); }
+        if p.has_openpgp { caps.insert(Caps::PGP); }
+        if p.has_piv { caps.insert(Caps::PIV); }
+        if p.reader_name.to_ascii_lowercase().contains("token2") {
+            caps.insert(Caps::OTP);
+        }
+        if caps.is_empty() {
+            continue;
+        }
+        let serial = p
+            .yubikey_serial
+            .clone()
+            .or_else(|| p.serial.clone())
+            .unwrap_or_default();
+        let id = if serial.is_empty() {
+            format!("reader:{}", p.reader_name)
+        } else {
+            format!("serial:{serial}")
+        };
+        let vendor = if p.yubikey_serial.is_some() {
+            "Yubico".to_string()
+        } else {
+            p.reader_name.split_whitespace().next().unwrap_or("Key").to_string()
+        };
+        let model = clean_model(&p.reader_name, &vendor);
+        devices.push(Device {
+            id,
+            name: keyring.name_for(Some(&serial)).map(str::to_owned),
+            vendor,
+            model,
+            serial,
+            transport: "USB · PC/SC".into(),
+            firmware: String::new(),
+            caps,
+            kind: DeviceKind::Key,
+            hid_path: None,
+            reader: Some(p.reader_name.clone()),
+        });
+    }
+
+    // --- 3. Merge FIDO HID nodes into their physical key.
+    for (i, hid) in hids.iter().enumerate() {
+        let serial = serials.get(i).cloned().flatten().unwrap_or_default();
+        let is_token2 = hid.vendor_id == keyroost_proto::USB_VID;
+
+        let reader_name: Option<String> = if hid.vendor_id == crate::VID_YUBICO {
+            yk_readers
+                .iter()
+                .find(|c| c.usb_bus == hid.usb_bus && c.usb_address == hid.usb_address && c.usb_bus.is_some())
+                .or_else(|| {
+                    let only: Vec<_> = yk_readers.iter().collect();
+                    if only.len() == 1 { Some(only[0]) } else { None }
+                })
+                .map(|c| c.reader_name.clone())
+        } else {
+            let vt = vendor_name(hid.vendor_id);
+            let matches: Vec<&str> = probes
+                .iter()
+                .filter(|p| !p.is_molto2)
+                .map(|p| p.reader_name.as_str())
+                .filter(|r| r.to_ascii_lowercase().contains(&vt.to_ascii_lowercase()))
+                .collect();
+            match matches.as_slice() {
+                [only] => Some((*only).to_string()),
+                _ => None,
+            }
+        };
+
+        let existing = devices.iter_mut().find(|d| {
+            d.kind == DeviceKind::Key
+                && ((reader_name.is_some() && d.reader == reader_name)
+                    || (!serial.is_empty() && d.serial == serial))
+        });
+        if let Some(dev) = existing {
+            dev.caps.insert(Caps::FIDO2);
+            if is_token2 {
+                dev.caps.insert(Caps::OTP);
+            }
+            dev.hid_path = Some(hid.path.clone());
+            dev.transport = "USB · PC/SC + FIDO HID".into();
+            if dev.serial.is_empty() {
+                dev.serial = serial.clone();
+            }
+            if dev.name.is_none() {
+                dev.name = keyring.name_for(Some(&serial)).map(str::to_owned);
+            }
+        } else {
+            let id = if !serial.is_empty() {
+                format!("serial:{serial}")
+            } else {
+                format!("hid:{}", hid.path.display())
+            };
+            let mut caps = Caps::default();
+            caps.insert(Caps::FIDO2);
+            if is_token2 {
+                caps.insert(Caps::OTP);
+            }
+            let vendor = vendor_name(hid.vendor_id).to_string();
+            let model = if is_token2 {
+                keyroost_proto::token2_pid_label(hid.product_id)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| clean_model(&hid.product_name, &vendor))
+            } else {
+                clean_model(&hid.product_name, &vendor)
+            };
+            devices.push(Device {
+                id,
+                name: keyring.name_for(Some(&serial)).map(str::to_owned),
+                vendor,
+                model,
+                serial,
+                transport: "USB · FIDO HID".into(),
+                firmware: String::new(),
+                caps,
+                kind: DeviceKind::Key,
+                hid_path: Some(hid.path.clone()),
+                reader: reader_name,
+            });
+        }
+    }
+
+    devices.sort_by(|a, b| {
+        (a.kind == DeviceKind::Token)
+            .cmp(&(b.kind == DeviceKind::Token))
+            .then_with(|| a.model.cmp(&b.model))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    devices
+}
+
 pub fn enumerate() -> Result<Vec<Device>, String> {
     Ok(Vec::new())
 }
@@ -123,6 +316,74 @@ pub fn enumerate() -> Result<Vec<Device>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use keyroost_hid::{HID_USAGE_FIDO_AUTHENTICATOR, HID_USAGE_PAGE_FIDO};
+
+    fn hid(vid: u16, pid: u16, path: &str, serial: Option<&str>, bus: Option<u8>, addr: Option<u8>) -> HidDevice {
+        HidDevice {
+            path: path.into(), vendor_id: vid, product_id: pid,
+            product_name: "Security Key".into(),
+            usage_page: HID_USAGE_PAGE_FIDO, usage: HID_USAGE_FIDO_AUTHENTICATOR,
+            serial_number: serial.map(str::to_owned), usb_bus: bus, usb_address: addr,
+        }
+    }
+
+    fn probe(name: &str, molto2: bool, oath: bool, pgp: bool, piv: bool,
+             yk_serial: Option<&str>, bus: Option<u8>, addr: Option<u8>) -> ReaderProbe {
+        ReaderProbe {
+            reader_name: name.into(), is_molto2: molto2, serial: None,
+            has_oath: oath, has_openpgp: pgp, has_piv: piv,
+            yubikey_serial: yk_serial.map(str::to_owned), usb_bus: bus, usb_address: addr,
+        }
+    }
+
+    #[test]
+    fn molto2_with_no_hid_sibling_is_a_token() {
+        let probes = [probe("TOKEN2 Molto2 (5C7D…) 02 00", true, false, false, false, None, Some(9), Some(4))];
+        let devs = correlate(&[], &probes, &Keyring::default());
+        assert_eq!(devs.len(), 1);
+        assert_eq!(devs[0].kind, DeviceKind::Token);
+        assert_eq!(devs[0].model, "Molto2");
+        assert!(devs[0].caps.has(Caps::TOTP));
+    }
+
+    #[test]
+    fn molto2_flag_with_hid_sibling_is_not_a_token() {
+        let probes = [probe("TOKEN2 something 02 00", true, false, false, false, None, Some(9), Some(4))];
+        let hids = [hid(keyroost_proto::USB_VID, 0x0013, "/dev/hidraw9", Some("S1"), Some(9), Some(4))];
+        let devs = correlate(&hids, &probes, &Keyring::default());
+        assert!(devs.iter().all(|d| d.kind != DeviceKind::Token));
+    }
+
+    #[test]
+    fn yubikey_unions_hid_fido_with_ccid_applets() {
+        let probes = [probe("Yubico YubiKey OTP+FIDO+CCID 00 00", false, true, true, true, Some("37806840"), Some(9), Some(16))];
+        let hids = [hid(0x1050, 0x0407, "/dev/hidraw17", None, Some(9), Some(16))];
+        let devs = correlate(&hids, &probes, &Keyring::default());
+        assert_eq!(devs.len(), 1);
+        let d = &devs[0];
+        assert_eq!(d.kind, DeviceKind::Key);
+        assert!(d.caps.has(Caps::FIDO2) && d.caps.has(Caps::OATH) && d.caps.has(Caps::PGP) && d.caps.has(Caps::PIV));
+        assert_eq!(d.serial, "37806840");
+    }
+
+    #[test]
+    fn solo2_merges_by_shared_serial() {
+        let serial = "07A9568FBE31AD5DAD1F2298476CF0D4";
+        let probes = [probe("SoloKeys Solo 2 [CCID/ICCD Interface] 01 00", false, true, false, false, None, Some(9), Some(15))];
+        let hids = [hid(0x1209, 0xbeee, "/dev/hidraw14", Some(serial), Some(9), Some(15))];
+        let devs = correlate(&hids, &probes, &Keyring::default());
+        assert!(devs.iter().any(|d| d.kind == DeviceKind::Key && d.caps.has(Caps::FIDO2)));
+        assert!(devs.iter().all(|d| d.kind != DeviceKind::Token));
+    }
+
+    #[test]
+    fn token2_fido_key_gets_otp_cap_by_pid() {
+        let probes: [ReaderProbe; 0] = [];
+        let hids = [hid(keyroost_proto::USB_VID, 0x0013, "/dev/hidraw9", Some("S1"), Some(9), Some(4))];
+        let devs = correlate(&hids, &probes, &Keyring::default());
+        assert_eq!(devs.len(), 1);
+        assert!(devs[0].caps.has(Caps::FIDO2) && devs[0].caps.has(Caps::OTP));
+    }
 
     #[test]
     fn caps_insert_has_and_empty() {
