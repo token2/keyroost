@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 mod otp_pane;
 mod ui;
 use otp_pane::OtpState;
-use ui::device::{self, CapTab, Caps, DeviceId, DeviceKind, UiDevice};
+use ui::device::{self, CapTab, Caps, Device, DeviceId, DeviceKind, DeviceView};
 use ui::theme::{self, BtnKind, Mode, Palette};
 
 use eframe::egui;
@@ -581,7 +581,7 @@ struct App {
     /// Bulk-import dialog state.
     bulk_dialog: BulkDialog,
     /// Unified device list (physical keys + Molto2 tokens), most recent scan.
-    devices: Vec<UiDevice>,
+    devices: Vec<Device>,
     /// Selected device id — stable across refreshes so the pane doesn't jump
     /// when an *unrelated* key is plugged or unplugged.
     selected_device: Option<DeviceId>,
@@ -2940,7 +2940,7 @@ impl App {
     }
 
     /// The currently selected device, if the id still resolves to a present one.
-    fn selected_device(&self) -> Option<&UiDevice> {
+    fn selected_device(&self) -> Option<&Device> {
         let id = self.selected_device.as_ref()?;
         self.devices.iter().find(|d| &d.id == id)
     }
@@ -3556,7 +3556,7 @@ impl App {
     /// the Molto2 hero: open the inline field, cancel it, or commit the name.
     /// The flags are collected during the `ui` closures (where `self` is already
     /// borrowed) and applied here afterwards.
-    fn apply_rename_actions(&mut self, dev: &UiDevice, open: bool, cancel: bool, save: bool) {
+    fn apply_rename_actions(&mut self, dev: &Device, open: bool, cancel: bool, save: bool) {
         if open {
             self.rename_open = true;
             self.rename_input = dev.name.clone().unwrap_or_default();
@@ -3684,7 +3684,7 @@ fn glyph_tile(
 }
 
 /// Does the device match the sidebar filter text?
-fn matches_filter(d: &UiDevice, q: &str) -> bool {
+fn matches_filter(d: &Device, q: &str) -> bool {
     let q = q.trim().to_ascii_lowercase();
     if q.is_empty() {
         return true;
@@ -4015,7 +4015,7 @@ fn paint_x_icon(ui: &egui::Ui, center: egui::Pos2, color: egui::Color32) {
 /// Paint one selectable device row. The whole row is a single painter-drawn
 /// click target (no nested widgets), so clicking anywhere in it selects the
 /// device — fixing the "only the gaps are clickable" inconsistency.
-fn device_row(ui: &mut egui::Ui, p: &Palette, dev: &UiDevice, selected: bool) -> bool {
+fn device_row(ui: &mut egui::Ui, p: &Palette, dev: &Device, selected: bool) -> bool {
     let w = ui.available_width();
     let h = 68.0;
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
@@ -4709,7 +4709,7 @@ impl App {
     }
 
     /// Device hero strip at the top of a key's pane.
-    fn device_hero(&mut self, ui: &mut egui::Ui, p: &Palette, dev: &UiDevice) {
+    fn device_hero(&mut self, ui: &mut egui::Ui, p: &Palette, dev: &Device) {
         let mut open_rename = false;
         let mut do_save = false;
         let mut do_cancel = false;
@@ -4782,7 +4782,7 @@ impl App {
 
     /// Capability tab bar under the hero. The active tab gets `txt` + an accent
     /// underline; the rest are muted.
-    fn cap_tabs(&mut self, ui: &mut egui::Ui, p: &Palette, dev: &UiDevice) {
+    fn cap_tabs(&mut self, ui: &mut egui::Ui, p: &Palette, dev: &Device) {
         ui.add_space(12.0);
         let mut next = None;
         ui.horizontal(|ui| {
@@ -4857,7 +4857,7 @@ impl App {
 
     /// Overview tab: one summary card per capability, each with a `Manage →` jump.
     /// Scrolling comes from the shared capability-pane scroller in `central`.
-    fn overview(&mut self, ui: &mut egui::Ui, p: &Palette, dev: &UiDevice) {
+    fn overview(&mut self, ui: &mut egui::Ui, p: &Palette, dev: &Device) {
         ui.vertical(|ui| {
             if dev.caps.has(Caps::FIDO2) {
                 theme::card_frame(p).show(ui, |ui| {
@@ -5939,7 +5939,7 @@ impl App {
 
     /// The Molto2 token's dedicated amber view: hero band · customer-key strip ·
     /// 100-slot rail + editor.
-    fn molto_view(&mut self, ui: &mut egui::Ui, p: &Palette, dev: &UiDevice) {
+    fn molto_view(&mut self, ui: &mut egui::Ui, p: &Palette, dev: &Device) {
         // Make brand-orange the accent throughout the Molto2 view, so its help
         // dots, links, selection highlights and primary action are all one
         // orange rather than mixing the app's blue accent into the token's
