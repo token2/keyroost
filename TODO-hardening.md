@@ -368,6 +368,69 @@ not after.
   design text above with the shipped no-arg `enumerate()` (it loads the default
   keyring internally).
 
+**Design (locked 2026-06-17; decided with the user).**
+
+*Naming style — "tidy" (shallow + consistent).* Nest the flat domains under
+groups; drop now-redundant prefixes; converge the four resets to `<group> reset`;
+shorten verbose Molto2 leaves; keep leaves hyphenated (no deeper sub-groups); keep
+the change-vs-set distinction (change a PIN, set a field). Already-nested groups
+(`piv`/`oath`/`openpgp`/`otp`/`key-name`) keep their leaf names. Full old→new map:
+
+| Old | New |
+|---|---|
+| `info` / bare Molto2 info | `molto info` |
+| `set-seed` / `set-title` / `configure` | `molto seed` / `molto title` / `molto config` |
+| `sync-time` / `set-customer-key` | `molto sync-time` / `molto customer-key` |
+| `import` / `import-file` | `molto import` / `molto import-file` |
+| `factory-reset` | `molto reset` |
+| `probe` | `molto probe` (`hide=true`) |
+| `fido-info` / `fido-reset` | `fido info` / `fido reset` |
+| `fido-pin-set` / `-pin-change` / `-pin-retries` | `fido pin-set` / `pin-change` / `pin-retries` |
+| `fido-creds-list` / `-metadata` / `-delete` | `fido creds-list` / `creds-metadata` / `creds-delete` |
+
+Unchanged: `piv`/`oath`/`openpgp`/`otp`/`key-name` subcommands; top-level
+device-agnostic `list` / `doctor` / `completions` / `manpage` + the bare overview.
+Bare `keyroostctl` stays the Phase-2 overview; the Molto2 serial/clock is now
+`molto info`.
+
+*Targeting — keep the flags, one resolver (user chose "keep").* `--name
+<friendly>` works on **every** group, resolved through the Phase-1 device model.
+The existing `--reader <substr>` (piv/oath/openpgp), `--path` (fido), `--transport`
+(otp) **stay** as additional inputs into the SAME resolver — not parallel code
+paths. `--key*` moves from global onto the `molto` group (Molto2-scoped). One
+`resolve_target(selector, group)` built on `keyroost_resolve::enumerate()` returns
+the right handle (reader name / hidraw path / Molto2 reader); the six `open_*`
+helpers (`open_oath`/`open_openpgp`/`open_piv`/`open_piv_authed`/`open_otp` +
+`resolve_fido_path`) call it — that shared resolve step is the dedup. `--name` and
+`--path` stay mutually exclusive.
+
+*Manual readability (the user's concern — addressed in this phase).* The nesting
+itself is the main win: top-level `--help` drops from 27 flat commands to ~12
+groups+utilities; `keyroostctl piv --help` shows only PIV. For the manual: make
+`manpage` emit a **git-style set** — `keyroostctl.1` (overview + group list) plus
+`keyroostctl-<group>.1` per group (`man keyroostctl-piv`), instead of one troff
+blob, via clap_mangen's per-subcommand generation. Make `--name`/`--debug` global
+so they document once, not on all ~60 leaves.
+
+*Order — restructure first, docs as an end sweep.* (1) Restructure the clap tree
+(nest/rename, hide `probe`, move `--key*`) + rewire dispatch. (2) Unify targeting
+(`--name` everywhere) + dedup the `open_*` plumbing through `resolve_target`. (3)
+**Documentation sweep against the finished tree:** the per-group `manpage`
+generator; the README + every `docs/*.html` command example; a migration note
+(old→new table) in the README and `CHANGELOG [0.6.0]`. Both man pages (generated
+from clap) and the hand-written docs depend on the final names, so they land last,
+together — satisfying Phase 6 for the rename surface.
+
+*Testing.* clap `Command::debug_assert()`; parse tests (new paths parse, old flat
+names are rejected, `--name` accepted on every group, `--name`+`--path` conflict);
+`resolve_target` unit tests on the shared model; a man-page-generation smoke test
+(a page per group, no panic). The known-answer / protocol-layer tests are
+untouched (this is CLI surface only).
+
+*Out of scope:* `--json` (Phase 4); the Token2 PIN+ experimental applet support
+(Phase 4/5); the non-rename parts of the docs (Phase 6 proper) beyond the command
+examples + migration note.
+
 ### Phase 4 — Feature gaps
 Per-device parity audit (esp. the Token2 OTP CLI merged in #24 — confirm it
 covers enumerate / add / delete / config / button-HOTP). Evaluate a `--json`
