@@ -414,4 +414,38 @@ mod tests {
         assert_eq!(vendor_name(0x349e), "Token2");
         assert_eq!(vendor_name(0xffff), "Security key");
     }
+
+    #[test]
+    fn two_yubikeys_do_not_collapse() {
+        // Two YubiKeys, disambiguated by USB topology — must stay two devices, each
+        // with its own serial and FIDO2+OATH caps (guards the phase-3 topology match).
+        let probes = [
+            probe("Yubico YubiKey OTP+FIDO+CCID 00 00", false, true, false, false, Some("111"), Some(9), Some(16)),
+            probe("Yubico YubiKey OTP+FIDO+CCID 01 00", false, true, false, false, Some("222"), Some(9), Some(17)),
+        ];
+        let hids = [
+            hid(0x1050, 0x0407, "/dev/hidraw17", None, Some(9), Some(16)),
+            hid(0x1050, 0x0407, "/dev/hidraw18", None, Some(9), Some(17)),
+        ];
+        let devs = correlate(&hids, &probes, &Keyring::default());
+        assert_eq!(devs.len(), 2);
+        let serials: std::collections::HashSet<String> = devs.iter().map(|d| d.serial.clone()).collect();
+        assert!(serials.contains("111") && serials.contains("222"));
+        assert!(devs.iter().all(|d| d.caps.has(Caps::FIDO2) && d.caps.has(Caps::OATH)));
+    }
+
+    #[test]
+    fn fido_only_non_token2_key_is_plain_fido2() {
+        // A Nitrokey FIDO HID with no CCID reader → one Key, FIDO2 only (no OTP),
+        // vendor/model derived from the USB vendor id + product name.
+        let probes: [ReaderProbe; 0] = [];
+        let mut h = hid(0x20a0, 0x0001, "/dev/hidraw3", Some("NK1"), Some(9), Some(20));
+        h.product_name = "Nitrokey 3".into();
+        let devs = correlate(&[h], &probes, &Keyring::default());
+        assert_eq!(devs.len(), 1);
+        assert_eq!(devs[0].kind, DeviceKind::Key);
+        assert!(devs[0].caps.has(Caps::FIDO2));
+        assert!(!devs[0].caps.has(Caps::OTP));
+        assert_eq!(devs[0].vendor, "Nitrokey");
+    }
 }
