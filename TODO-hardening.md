@@ -287,6 +287,55 @@ diagnostic dump, enriched with VID:PID + the computed classification (so the
 next bug report hands us what My1's did, by design). Bare invocation rewired
 exactly once, straight to the friendly form (no interim raw-list step).
 
+**Design (locked 2026-06-16; format chosen with the user, builds on the Phase 1
+shared model).**
+
+*Decisions:*
+1. **Bare overview = aligned columns.** One line per device:
+   `vendor · model-or-name · cap badges · short serial · transport`, columns
+   aligned (widths computed across the device list). Serial truncated to ~8 chars
+   + `…` (the full serial lives in `list`); transport abbreviated
+   (`USB · PC/SC + FIDO HID` → `USB·PC/SC+HID`). Empty → `No devices connected.`;
+   an `enumerate()` error prints the message (e.g. HID failure), never panics.
+2. **`list` = the raw 3 sections + a `Correlated devices` summary.** Keep PC/SC
+   readers / applet probe / FIDO HID (lightly enriched: `token2_pid_label` on the
+   HID line) so the *un-correlated* inputs stay visible, then append one line per
+   physical device: `kind · vendor model · badges · the reader/HID it paired`.
+   Reuses the **pure** `correlate(&hids, &probes, &keyring)` on the same hid+probe
+   snapshot `run_list` already gathers — no double enumeration, one consistent
+   snapshot (the payoff of Phase 1's I/O-vs-pure split).
+3. **Shared badge vocabulary** = `Device::cap_badges() -> Vec<&'static str>` in
+   keyroost-resolve (ordered FIDO2/OATH/PGP/PIV/OTP, or `["TOTP token"]` for a
+   Token). Single source of truth; the **GUI pills adopt it too** → parity by
+   construction, and it fixes the sidebar currently omitting the OTP badge on
+   Token2 keys.
+
+*Shape:*
+- keyroost-resolve: add `Device::cap_badges()`.
+- New `crates/keyroostctl/src/overview.rs`: `print_overview(&[Device])` (bare),
+  `print_correlated(&[Device])` (the `list` section), and shared badge-line +
+  column-width helpers. The pure formatters are separated from the thin `print_*`
+  stdout wrappers so the formatting is unit-testable.
+- `keyroostctl/src/main.rs`: bare dispatch (~1436) → `print_overview(enumerate()?)`
+  (replacing the Molto2 `print_info`); `run_list` (~2113) keeps its raw sections
+  and appends the correlated section.
+- `keyroost/src/main.rs` (~4125): the pill loop switches to `dev.cap_badges()`.
+
+*Deliverables:* D1 `cap_badges()` in resolve + GUI adoption; D2 `overview.rs`
+formatters + bare rewire; D3 `list` correlated section; D4 unit tests
+(`cap_badges`, the badge line, column alignment, serial truncation, the Token
+"TOTP token" case, the empty list).
+
+*Out of scope (later phases):* `--json` (Phase 4); unified `--name` targeting and
+the command renames — including moving the Molto2 `info` to `molto info` (Phase
+3). Until Phase 3, the Molto2 serial/UTC that bare invocation used to show stays
+reachable via the existing `info` subcommand, so nothing is lost.
+
+*Risks:* (a) the transport-abbreviation map must cover every `Device.transport`
+value; (b) the GUI `cap_badges()` swap intentionally changes sidebar pills (adds
+the OTP badge); (c) alignment must handle a friendly name standing in for the
+model.
+
 ### Phase 3 — Consistency pass (the breaking part)
 **Decisions (locked from Phase 0, 2026-06-14):**
 - **Nest every device under a named group.** FIDO flat → `fido <sub>`, *and*
