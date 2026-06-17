@@ -34,22 +34,6 @@ static SELECTED_KEY_NAME: OnceLock<Option<String>> = OnceLock::new();
     about = "Program Token2 Molto2 / Molto2v2 TOTP tokens"
 )]
 struct Cli {
-    /// Customer key as hex (alternative to --key-ascii). Default used if no
-    /// key option is supplied. Argv is visible in `ps` and shell history;
-    /// prefer --key-env for a non-default key.
-    #[arg(long, global = true, value_name = "HEX")]
-    key: Option<String>,
-    /// Customer key as ASCII (alternative to --key). Argv is visible in `ps`
-    /// and shell history; prefer --key-ascii-env for a non-default key.
-    #[arg(long, global = true, value_name = "TEXT", conflicts_with = "key")]
-    key_ascii: Option<String>,
-    /// Read the hex customer key from the named environment variable
-    /// (keeps it out of argv and shell history).
-    #[arg(long, global = true, value_name = "VAR", conflicts_with_all = ["key", "key_ascii"])]
-    key_env: Option<String>,
-    /// Read the ASCII customer key from the named environment variable.
-    #[arg(long, global = true, value_name = "VAR", conflicts_with_all = ["key", "key_ascii", "key_env"])]
-    key_ascii_env: Option<String>,
     /// List available PC/SC readers and exit.
     #[arg(long, global = true)]
     list_readers: bool,
@@ -67,8 +51,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Print device serial number and on-device UTC time.
-    Info,
     /// Print shell completions to stdout (e.g. `keyroostctl completions bash
     /// > /etc/bash_completion.d/keyroostctl`).
     Completions {
@@ -81,160 +63,12 @@ enum Cmd {
     /// Diagnose the local environment: PC/SC service, readers, FIDO HID
     /// access, udev rules, registry permissions. Read-only, touches no key.
     Doctor,
-    /// Write a TOTP seed to a profile slot. The seed can come from argv
-    /// (--hex/--base32 — visible in `ps` and shell history), an environment
-    /// variable, or stdin; supply exactly one source.
-    SetSeed {
-        /// Profile index 0..=99.
-        #[arg(short, long)]
-        profile: u8,
-        /// Seed in hex. Argv is visible in `ps` and shell history; prefer
-        /// --hex-env or --hex-stdin.
-        #[arg(long, conflicts_with = "base32", value_name = "HEX")]
-        hex: Option<String>,
-        /// Seed in base32 (RFC 4648; whitespace and dashes tolerated). Argv
-        /// is visible in `ps` and shell history; prefer --base32-env or
-        /// --base32-stdin.
-        #[arg(long, value_name = "B32")]
-        base32: Option<String>,
-        /// Read the hex seed from the named environment variable.
-        #[arg(long, value_name = "VAR")]
-        hex_env: Option<String>,
-        /// Read the base32 seed from the named environment variable.
-        #[arg(long, value_name = "VAR")]
-        base32_env: Option<String>,
-        /// Read the hex seed from stdin (one line).
-        #[arg(long)]
-        hex_stdin: bool,
-        /// Read the base32 seed from stdin (one line).
-        #[arg(long)]
-        base32_stdin: bool,
-    },
-    /// Write a profile title (1..=12 ASCII chars).
-    SetTitle {
-        #[arg(short, long)]
-        profile: u8,
-        title: String,
-    },
-    /// Set profile TOTP configuration (and seed the clock with the host's UTC time).
-    Configure {
-        #[arg(short, long)]
-        profile: u8,
-        #[arg(long, value_enum, default_value_t = AlgoArg::Sha1)]
-        algorithm: AlgoArg,
-        #[arg(long, value_enum, default_value_t = DigitsArg::Six)]
-        digits: DigitsArg,
-        #[arg(long, value_enum, default_value_t = StepArg::S30)]
-        time_step: StepArg,
-        #[arg(long, value_enum, default_value_t = TimeoutArg::S30)]
-        display_timeout: TimeoutArg,
-    },
-    /// Push the host's current UTC time to one profile (or all profiles).
-    SyncTime {
-        /// Sync only this profile (omit `--all`).
-        #[arg(short, long, conflicts_with = "all")]
-        profile: Option<u8>,
-        /// Sync time on every profile 0..=99.
-        #[arg(long)]
-        all: bool,
-    },
-    /// Rotate the device's customer key (requires physical button
-    /// confirmation). The new key can come from argv (--hex/--ascii —
-    /// visible in `ps` and shell history), an environment variable, or
-    /// stdin; supply exactly one source.
-    SetCustomerKey {
-        /// New key in hex. Argv is visible in `ps` and shell history;
-        /// prefer --hex-env or --hex-stdin.
-        #[arg(long, conflicts_with = "ascii", value_name = "HEX")]
-        hex: Option<String>,
-        /// New key as ASCII. Argv is visible in `ps` and shell history;
-        /// prefer --ascii-env or --ascii-stdin.
-        #[arg(long, value_name = "TEXT")]
-        ascii: Option<String>,
-        /// Read the new hex key from the named environment variable.
-        #[arg(long, value_name = "VAR")]
-        hex_env: Option<String>,
-        /// Read the new ASCII key from the named environment variable.
-        #[arg(long, value_name = "VAR")]
-        ascii_env: Option<String>,
-        /// Read the new hex key from stdin (one line).
-        #[arg(long)]
-        hex_stdin: bool,
-        /// Read the new ASCII key from stdin (one line).
-        #[arg(long)]
-        ascii_stdin: bool,
-    },
-    /// Import an otpauth:// URI to a profile: writes seed, title, and config in one go.
-    Import {
-        #[arg(short, long)]
-        profile: u8,
-        /// Override the profile title (default: derived from URI issuer/account).
-        #[arg(long)]
-        title: Option<String>,
-        /// Display timeout in seconds (otpauth:// has no equivalent field).
-        #[arg(long, value_enum, default_value_t = TimeoutArg::S30)]
-        display_timeout: TimeoutArg,
-        /// Decode the otpauth:// URI from a QR code in a PNG/JPEG screenshot
-        /// instead of passing it as text. For Google Authenticator export
-        /// QRs (multiple accounts), use `import-file` with the image path.
-        #[arg(long, value_name = "IMAGE", conflicts_with = "uri")]
-        qr: Option<std::path::PathBuf>,
-        /// The otpauth:// URI. Use single quotes to protect & from the shell.
-        /// Argv is visible in `ps` and shell history (the URI embeds the
-        /// secret); pass `-` to read the URI from stdin, or use --qr.
-        uri: Option<String>,
-    },
-    /// Bulk-import a plaintext or encrypted export from Aegis, 2FAS, or a list
-    /// of otpauth:// URIs. For encrypted Aegis vaults, pass the password via
-    /// `--password-stdin` (suitable for piping from a file or password manager)
-    /// or `--password-env VAR`.
-    ImportFile {
-        /// Path to the export file. Format is auto-detected.
-        path: std::path::PathBuf,
-        /// Starting profile index. Entries fill consecutive slots from here.
-        #[arg(long, default_value_t = 0)]
-        start: u8,
-        /// Display timeout to use for every imported entry.
-        #[arg(long, value_enum, default_value_t = TimeoutArg::S30)]
-        display_timeout: TimeoutArg,
-        /// Print what would be written, but don't touch the device.
-        #[arg(long)]
-        dry_run: bool,
-        /// Read the vault password from stdin (single line, no trailing newline).
-        #[arg(long, conflicts_with = "password_env")]
-        password_stdin: bool,
-        /// Read the vault password from the named environment variable.
-        #[arg(long, value_name = "VAR")]
-        password_env: Option<String>,
-    },
-    /// Sweep plausible read APDUs against the device and report what the firmware
-    /// recognizes. Read-only by intent — sends short read-style requests with
-    /// destructive INS bytes (set seed/title/config, factory reset, set customer
-    /// key) excluded by default.
-    Probe {
-        /// Confirm you understand this sends ~256–512 experimental APDUs.
-        #[arg(long)]
-        yes: bool,
-        /// Also probe the secure class (CLA 0x84) after authenticating. Without
-        /// this, only CLA 0x80 is scanned (no auth needed).
-        #[arg(long)]
-        authed: bool,
-        /// Override the safety filter and scan every INS byte 0x00..0xFF.
-        /// Only useful if you've already exhausted the safe sweep.
-        #[arg(long)]
-        include_destructive: bool,
-        /// Profile slot to use in P2 for `authed` scans (P2 is the profile index
-        /// for the known secure commands). Defaults to a high, presumably-unused
-        /// slot.
-        #[arg(long, default_value_t = 99)]
-        slot: u8,
-    },
-    /// Factory-reset the device. Wipes profiles and restores default customer key.
-    /// Requires physical button confirmation on the device.
-    FactoryReset {
-        /// Confirm you really want to wipe the device.
-        #[arg(long)]
-        yes: bool,
+    /// Token2 Molto2 / Molto2v2 programmable TOTP token.
+    Molto {
+        #[command(flatten)]
+        key: KeyArgs,
+        #[command(subcommand)]
+        cmd: MoltoCmd,
     },
     /// List connected devices: PC/SC readers and FIDO HID authenticators.
     List {
@@ -978,6 +812,191 @@ enum OathCmd {
     },
 }
 
+/// Molto2 customer-key selection (Molto2-scoped; was global pre-0.6.0).
+#[derive(clap::Args)]
+struct KeyArgs {
+    /// Customer key as hex (alternative to --key-ascii). Default used if no
+    /// key option is supplied. Argv is visible in `ps` and shell history;
+    /// prefer --key-env for a non-default key.
+    #[arg(long, global = true, value_name = "HEX")]
+    key: Option<String>,
+    /// Customer key as ASCII (alternative to --key). Argv is visible in `ps`
+    /// and shell history; prefer --key-ascii-env for a non-default key.
+    #[arg(long, global = true, value_name = "TEXT", conflicts_with = "key")]
+    key_ascii: Option<String>,
+    /// Read the hex customer key from the named environment variable
+    /// (keeps it out of argv and shell history).
+    #[arg(long, global = true, value_name = "VAR", conflicts_with_all = ["key", "key_ascii"])]
+    key_env: Option<String>,
+    /// Read the ASCII customer key from the named environment variable.
+    #[arg(long, global = true, value_name = "VAR", conflicts_with_all = ["key", "key_ascii", "key_env"])]
+    key_ascii_env: Option<String>,
+}
+
+/// Token2 Molto2 / Molto2v2 subcommands. These talk to the Molto2 PC/SC
+/// reader, authenticated with the customer key (see the `--key*` flags).
+#[derive(Subcommand)]
+enum MoltoCmd {
+    /// Print device serial number and on-device UTC time.
+    Info,
+    /// Write a TOTP seed to a profile slot. The seed can come from argv
+    /// (--hex/--base32 — visible in `ps` and shell history), an environment
+    /// variable, or stdin; supply exactly one source.
+    Seed {
+        /// Profile index 0..=99.
+        #[arg(short, long)]
+        profile: u8,
+        /// Seed in hex. Argv is visible in `ps` and shell history; prefer
+        /// --hex-env or --hex-stdin.
+        #[arg(long, conflicts_with = "base32", value_name = "HEX")]
+        hex: Option<String>,
+        /// Seed in base32 (RFC 4648; whitespace and dashes tolerated). Argv
+        /// is visible in `ps` and shell history; prefer --base32-env or
+        /// --base32-stdin.
+        #[arg(long, value_name = "B32")]
+        base32: Option<String>,
+        /// Read the hex seed from the named environment variable.
+        #[arg(long, value_name = "VAR")]
+        hex_env: Option<String>,
+        /// Read the base32 seed from the named environment variable.
+        #[arg(long, value_name = "VAR")]
+        base32_env: Option<String>,
+        /// Read the hex seed from stdin (one line).
+        #[arg(long)]
+        hex_stdin: bool,
+        /// Read the base32 seed from stdin (one line).
+        #[arg(long)]
+        base32_stdin: bool,
+    },
+    /// Write a profile title (1..=12 ASCII chars).
+    Title {
+        #[arg(short, long)]
+        profile: u8,
+        title: String,
+    },
+    /// Set profile TOTP configuration (and seed the clock with the host's UTC time).
+    Config {
+        #[arg(short, long)]
+        profile: u8,
+        #[arg(long, value_enum, default_value_t = AlgoArg::Sha1)]
+        algorithm: AlgoArg,
+        #[arg(long, value_enum, default_value_t = DigitsArg::Six)]
+        digits: DigitsArg,
+        #[arg(long, value_enum, default_value_t = StepArg::S30)]
+        time_step: StepArg,
+        #[arg(long, value_enum, default_value_t = TimeoutArg::S30)]
+        display_timeout: TimeoutArg,
+    },
+    /// Push the host's current UTC time to one profile (or all profiles).
+    SyncTime {
+        /// Sync only this profile (omit `--all`).
+        #[arg(short, long, conflicts_with = "all")]
+        profile: Option<u8>,
+        /// Sync time on every profile 0..=99.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Rotate the device's customer key (requires physical button
+    /// confirmation). The new key can come from argv (--hex/--ascii —
+    /// visible in `ps` and shell history), an environment variable, or
+    /// stdin; supply exactly one source.
+    CustomerKey {
+        /// New key in hex. Argv is visible in `ps` and shell history;
+        /// prefer --hex-env or --hex-stdin.
+        #[arg(long, conflicts_with = "ascii", value_name = "HEX")]
+        hex: Option<String>,
+        /// New key as ASCII. Argv is visible in `ps` and shell history;
+        /// prefer --ascii-env or --ascii-stdin.
+        #[arg(long, value_name = "TEXT")]
+        ascii: Option<String>,
+        /// Read the new hex key from the named environment variable.
+        #[arg(long, value_name = "VAR")]
+        hex_env: Option<String>,
+        /// Read the new ASCII key from the named environment variable.
+        #[arg(long, value_name = "VAR")]
+        ascii_env: Option<String>,
+        /// Read the new hex key from stdin (one line).
+        #[arg(long)]
+        hex_stdin: bool,
+        /// Read the new ASCII key from stdin (one line).
+        #[arg(long)]
+        ascii_stdin: bool,
+    },
+    /// Import an otpauth:// URI to a profile: writes seed, title, and config in one go.
+    Import {
+        #[arg(short, long)]
+        profile: u8,
+        /// Override the profile title (default: derived from URI issuer/account).
+        #[arg(long)]
+        title: Option<String>,
+        /// Display timeout in seconds (otpauth:// has no equivalent field).
+        #[arg(long, value_enum, default_value_t = TimeoutArg::S30)]
+        display_timeout: TimeoutArg,
+        /// Decode the otpauth:// URI from a QR code in a PNG/JPEG screenshot
+        /// instead of passing it as text. For Google Authenticator export
+        /// QRs (multiple accounts), use `import-file` with the image path.
+        #[arg(long, value_name = "IMAGE", conflicts_with = "uri")]
+        qr: Option<std::path::PathBuf>,
+        /// The otpauth:// URI. Use single quotes to protect & from the shell.
+        /// Argv is visible in `ps` and shell history (the URI embeds the
+        /// secret); pass `-` to read the URI from stdin, or use --qr.
+        uri: Option<String>,
+    },
+    /// Bulk-import a plaintext or encrypted export from Aegis, 2FAS, or a list
+    /// of otpauth:// URIs. For encrypted Aegis vaults, pass the password via
+    /// `--password-stdin` (suitable for piping from a file or password manager)
+    /// or `--password-env VAR`.
+    ImportFile {
+        /// Path to the export file. Format is auto-detected.
+        path: std::path::PathBuf,
+        /// Starting profile index. Entries fill consecutive slots from here.
+        #[arg(long, default_value_t = 0)]
+        start: u8,
+        /// Display timeout to use for every imported entry.
+        #[arg(long, value_enum, default_value_t = TimeoutArg::S30)]
+        display_timeout: TimeoutArg,
+        /// Print what would be written, but don't touch the device.
+        #[arg(long)]
+        dry_run: bool,
+        /// Read the vault password from stdin (single line, no trailing newline).
+        #[arg(long, conflicts_with = "password_env")]
+        password_stdin: bool,
+        /// Read the vault password from the named environment variable.
+        #[arg(long, value_name = "VAR")]
+        password_env: Option<String>,
+    },
+    /// Sweep plausible read APDUs against the device and report what the firmware
+    /// recognizes. Read-only by intent — sends short read-style requests with
+    /// destructive INS bytes (set seed/title/config, factory reset, set customer
+    /// key) excluded by default.
+    #[command(hide = true)]
+    Probe {
+        /// Confirm you understand this sends ~256–512 experimental APDUs.
+        #[arg(long)]
+        yes: bool,
+        /// Also probe the secure class (CLA 0x84) after authenticating. Without
+        /// this, only CLA 0x80 is scanned (no auth needed).
+        #[arg(long)]
+        authed: bool,
+        /// Override the safety filter and scan every INS byte 0x00..0xFF.
+        /// Only useful if you've already exhausted the safe sweep.
+        #[arg(long)]
+        include_destructive: bool,
+        /// Profile slot to use in P2 for `authed` scans (P2 is the profile index
+        /// for the known secure commands). Defaults to a high, presumably-unused
+        /// slot.
+        #[arg(long, default_value_t = 99)]
+        slot: u8,
+    },
+    /// Factory-reset the device. Wipes profiles and restores default customer key.
+    /// Requires physical button confirmation on the device.
+    Reset {
+        /// Confirm you really want to wipe the device.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
 /// FIDO2 / CTAP2 subcommands. These talk to a hidraw device, not the Molto2
 /// PC/SC reader.
 #[derive(Subcommand)]
@@ -1323,7 +1342,7 @@ impl TimeoutArg {
     }
 }
 
-fn customer_key_bytes(cli: &Cli) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
+fn customer_key_bytes(cli: &KeyArgs) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
     use zeroize::Zeroizing;
     if let Some(h) = &cli.key {
         hex_decode(h)
@@ -1448,7 +1467,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let Some(cmd) = cli.command.as_ref() else {
         // No subcommand → the friendly correlated overview of every connected
-        // device. (The Molto2 serial/clock still lives under `info`.)
+        // device. (The Molto2 serial/clock still lives under `molto info`.)
         let devices = keyroost_resolve::enumerate()?;
         overview::print_overview(&devices);
         return Ok(());
@@ -1468,48 +1487,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Cmd::Doctor = cmd {
         run_doctor();
-        return Ok(());
-    }
-
-    // --dry-run on bulk import doesn't need the device at all.
-    if let Cmd::ImportFile {
-        path,
-        start,
-        display_timeout: _,
-        dry_run: true,
-        password_stdin,
-        password_env,
-    } = cmd
-    {
-        let entries = load_bulk_entries(path, *password_stdin, password_env.as_deref())?;
-        let last = (*start as usize).saturating_add(entries.len());
-        println!(
-            "found {} entries; would fill slots #{}..#{} (dry-run)",
-            entries.len(),
-            start,
-            last.saturating_sub(1)
-        );
-        for (i, entry) in entries.iter().enumerate() {
-            let p = *start as usize + i;
-            println!(
-                "  #{:02}: {:?} ({} bytes, {:?}, {} digits, {:?})",
-                p,
-                entry.suggested_title(),
-                entry.secret.len(),
-                entry.algorithm,
-                entry.digits as u8,
-                entry.time_step
-            );
-        }
-        return Ok(());
-    }
-
-    // Info is read-only and needs no auth — mirrors the bare-invocation path.
-    if let Cmd::Info = cmd {
-        let mut session = Session::open()?;
-        session.set_debug(cli.debug);
-        let info = session.read_info()?;
-        print_info(&info);
         return Ok(());
     }
 
@@ -1556,12 +1533,70 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    // Token2 Molto2 / Molto2v2 commands all talk to the Molto2 PC/SC reader,
+    // authenticated with the customer key (scoped to this group via --key*).
+    if let Cmd::Molto { key, cmd } = cmd {
+        return run_molto(cmd, key, cli.debug);
+    }
+
+    unreachable!("every subcommand is handled above");
+}
+
+/// Dispatch the Token2 Molto2 / Molto2v2 subcommands. The customer key comes
+/// from the Molto2-scoped `--key*` flags (`KeyArgs`), not a global flag.
+fn run_molto(
+    cmd: &MoltoCmd,
+    key: &KeyArgs,
+    debug: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // --dry-run on bulk import doesn't need the device at all.
+    if let MoltoCmd::ImportFile {
+        path,
+        start,
+        display_timeout: _,
+        dry_run: true,
+        password_stdin,
+        password_env,
+    } = cmd
+    {
+        let entries = load_bulk_entries(path, *password_stdin, password_env.as_deref())?;
+        let last = (*start as usize).saturating_add(entries.len());
+        println!(
+            "found {} entries; would fill slots #{}..#{} (dry-run)",
+            entries.len(),
+            start,
+            last.saturating_sub(1)
+        );
+        for (i, entry) in entries.iter().enumerate() {
+            let p = *start as usize + i;
+            println!(
+                "  #{:02}: {:?} ({} bytes, {:?}, {} digits, {:?})",
+                p,
+                entry.suggested_title(),
+                entry.secret.len(),
+                entry.algorithm,
+                entry.digits as u8,
+                entry.time_step
+            );
+        }
+        return Ok(());
+    }
+
+    // Info is read-only and needs no auth — mirrors the bare-invocation path.
+    if let MoltoCmd::Info = cmd {
+        let mut session = Session::open()?;
+        session.set_debug(debug);
+        let info = session.read_info()?;
+        print_info(&info);
+        return Ok(());
+    }
+
     // Factory reset is a plain CLA 0x80 command and needs no auth. Read the
     // (read-only) device info before the --yes gate so even the refusal names
     // exactly which device would be wiped.
-    if let Cmd::FactoryReset { yes } = cmd {
+    if let MoltoCmd::Reset { yes } = cmd {
         let mut session = Session::open()?;
-        session.set_debug(cli.debug);
+        session.set_debug(debug);
         let info = session.read_info()?;
         print_info(&info);
         if !yes {
@@ -1579,7 +1614,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Probe walks unauth (and optionally auth) APDU space; it doesn't fit the
     // standard "open → auth → run command" flow because each transmission is
     // expected to fail with a non-9000 SW.
-    if let Cmd::Probe {
+    if let MoltoCmd::Probe {
         yes,
         authed,
         include_destructive,
@@ -1587,14 +1622,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     } = cmd
     {
         if !yes {
-            return Err("refusing to probe without --yes (see `keyroostctl probe --help`)".into());
+            return Err(
+                "refusing to probe without --yes (see `keyroostctl molto probe --help`)".into(),
+            );
         }
         let mut session = Session::open()?;
-        session.set_debug(cli.debug);
+        session.set_debug(debug);
         let info = session.read_info()?;
         print_info(&info);
         if *authed {
-            let key = customer_key_bytes(&cli)?;
+            let key = customer_key_bytes(key)?;
             match session.authenticate(&key) {
                 Ok(()) => println!("authenticated"),
                 Err(TransportError::AuthFailed { tries_remaining }) => {
@@ -1611,7 +1648,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let key = customer_key_bytes(&cli)?;
+    let key = customer_key_bytes(key)?;
     // Wire confidentiality for seeds is SM4 keyed off the customer key, and
     // the factory default is public (it ships in every unit and in this
     // source). Programming real seeds under it means anyone holding a USB
@@ -1619,17 +1656,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if key.as_slice() == DEFAULT_CUSTOMER_KEY
         && matches!(
             cmd,
-            Cmd::SetSeed { .. } | Cmd::Import { .. } | Cmd::ImportFile { .. }
+            MoltoCmd::Seed { .. } | MoltoCmd::Import { .. } | MoltoCmd::ImportFile { .. }
         )
     {
         eprintln!(
             "warning: using the factory-default customer key — seeds sent to the \
              device are decryptable by anyone who captures the USB traffic. \
-             Rotate it first: keyroostctl set-customer-key (see --help)."
+             Rotate it first: keyroostctl molto customer-key (see --help)."
         );
     }
     let mut session = Session::open()?;
-    session.set_debug(cli.debug);
+    session.set_debug(debug);
     let info = session.read_info()?;
     print_info(&info);
     match session.authenticate(&key) {
@@ -1645,11 +1682,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     match cmd {
-        Cmd::Info => unreachable!("handled above before auth"),
-        Cmd::Completions { .. } | Cmd::Manpage | Cmd::Doctor => {
-            unreachable!("handled above before auth")
-        }
-        Cmd::SetSeed {
+        MoltoCmd::Info => unreachable!("handled above before auth"),
+        MoltoCmd::Seed {
             profile,
             hex,
             base32,
@@ -1688,14 +1722,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             session.set_seed(*profile, &seed)?;
             println!("seed written to profile #{}", profile);
         }
-        Cmd::SetTitle { profile, title } => {
+        MoltoCmd::Title { profile, title } => {
             if title.is_empty() || title.len() > 12 {
                 return Err("title must be 1..=12 bytes".into());
             }
             session.set_title(*profile, title)?;
             println!("title set on profile #{}", profile);
         }
-        Cmd::Configure {
+        MoltoCmd::Config {
             profile,
             algorithm,
             digits,
@@ -1712,7 +1746,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             session.set_config(*profile, &cfg)?;
             println!("profile #{} configured", profile);
         }
-        Cmd::SyncTime { profile, all } => {
+        MoltoCmd::SyncTime { profile, all } => {
             if *all {
                 for p in 0..=99u8 {
                     match session.sync_time(p, unix_now()) {
@@ -1727,7 +1761,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 return Err("sync-time requires --profile <N> or --all".into());
             }
         }
-        Cmd::SetCustomerKey {
+        MoltoCmd::CustomerKey {
             hex,
             ascii,
             hex_env,
@@ -1762,7 +1796,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             session.set_customer_key(&new_key)?;
             println!("customer-key rotation requested. Press the up-arrow button on the device to confirm.");
         }
-        Cmd::Import {
+        MoltoCmd::Import {
             profile,
             title,
             display_timeout,
@@ -1848,7 +1882,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
         }
-        Cmd::ImportFile {
+        MoltoCmd::ImportFile {
             path,
             start,
             display_timeout,
@@ -1904,15 +1938,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             println!("done");
         }
-        Cmd::FactoryReset { .. } => unreachable!("handled above before auth"),
-        Cmd::Probe { .. } => unreachable!("handled above before auth"),
-        Cmd::List { .. } => unreachable!("handled above before auth"),
-        Cmd::KeyName { .. } => unreachable!("handled above before auth"),
-        Cmd::Oath { .. } => unreachable!("handled above before auth"),
-        Cmd::Openpgp { .. } => unreachable!("handled above before auth"),
-        Cmd::Piv { .. } => unreachable!("handled above before auth"),
-        Cmd::Otp { .. } => unreachable!("handled above before auth"),
-        Cmd::Fido { .. } => unreachable!("FIDO commands handled above before PC/SC auth"),
+        MoltoCmd::Reset { .. } => unreachable!("handled above before auth"),
+        MoltoCmd::Probe { .. } => unreachable!("handled above before auth"),
     }
     Ok(())
 }
@@ -4236,5 +4263,16 @@ mod cli_tests {
         assert!(parse(&["keyroostctl", "fido", "creds-list"]).is_ok());
         assert!(parse(&["keyroostctl", "fido-info"]).is_err());
         assert!(parse(&["keyroostctl", "fido-creds-list"]).is_err());
+    }
+
+    #[test]
+    fn molto_is_nested() {
+        assert!(parse(&["keyroostctl", "molto", "info"]).is_ok());
+        assert!(parse(&["keyroostctl", "molto", "seed", "--profile", "0", "--hex-stdin"]).is_ok());
+        assert!(parse(&["keyroostctl", "molto", "reset", "--yes"]).is_ok());
+        assert!(parse(&["keyroostctl", "molto", "probe", "--yes"]).is_ok());
+        assert!(parse(&["keyroostctl", "set-seed", "--profile", "0", "--hex-stdin"]).is_err());
+        assert!(parse(&["keyroostctl", "factory-reset", "--yes"]).is_err());
+        assert!(parse(&["keyroostctl", "molto", "info", "--key-env", "K"]).is_ok());
     }
 }
