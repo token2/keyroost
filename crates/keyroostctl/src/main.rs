@@ -600,6 +600,61 @@ enum OpenpgpCmd {
         #[arg(long, value_name = "SUBSTR")]
         reader: Option<String>,
     },
+    /// Change the user PIN (PW1). PINs are sourced from env vars or stdin
+    /// (stdin reads two consecutive lines: old then new) — never argv.
+    ChangePin {
+        /// Read the old user PIN (PW1) from the named environment variable.
+        #[arg(long, value_name = "VAR", conflicts_with = "old_pin_stdin")]
+        old_pin_env: Option<String>,
+        /// Read the old user PIN (PW1) from stdin (first line).
+        #[arg(long)]
+        old_pin_stdin: bool,
+        /// Read the new user PIN (PW1) from the named environment variable.
+        #[arg(long, value_name = "VAR", conflicts_with = "new_pin_stdin")]
+        new_pin_env: Option<String>,
+        /// Read the new user PIN (PW1) from stdin (second line).
+        #[arg(long)]
+        new_pin_stdin: bool,
+        #[arg(long, value_name = "SUBSTR")]
+        reader: Option<String>,
+    },
+    /// Change the admin PIN (PW3). PINs are sourced from env vars or stdin
+    /// (stdin reads two consecutive lines: old then new) — never argv.
+    ChangeAdminPin {
+        /// Read the old admin PIN (PW3) from the named environment variable.
+        #[arg(long, value_name = "VAR", conflicts_with = "old_pin_stdin")]
+        old_pin_env: Option<String>,
+        /// Read the old admin PIN (PW3) from stdin (first line).
+        #[arg(long)]
+        old_pin_stdin: bool,
+        /// Read the new admin PIN (PW3) from the named environment variable.
+        #[arg(long, value_name = "VAR", conflicts_with = "new_pin_stdin")]
+        new_pin_env: Option<String>,
+        /// Read the new admin PIN (PW3) from stdin (second line).
+        #[arg(long)]
+        new_pin_stdin: bool,
+        #[arg(long, value_name = "SUBSTR")]
+        reader: Option<String>,
+    },
+    /// Unblock the user PIN (PW1) using the admin PIN (PW3), setting a new user
+    /// PIN. Recovers a card whose user PIN is blocked without a factory reset.
+    /// PINs are sourced from env vars or stdin (admin then new) — never argv.
+    UnblockPin {
+        /// Read the admin PIN (PW3) from the named environment variable.
+        #[arg(long, value_name = "VAR", conflicts_with = "admin_pin_stdin")]
+        admin_pin_env: Option<String>,
+        /// Read the admin PIN (PW3) from stdin (first line).
+        #[arg(long)]
+        admin_pin_stdin: bool,
+        /// Read the new user PIN (PW1) from the named environment variable.
+        #[arg(long, value_name = "VAR", conflicts_with = "new_pin_stdin")]
+        new_pin_env: Option<String>,
+        /// Read the new user PIN (PW1) from stdin (second line).
+        #[arg(long)]
+        new_pin_stdin: bool,
+        #[arg(long, value_name = "SUBSTR")]
+        reader: Option<String>,
+    },
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -3217,6 +3272,52 @@ fn run_openpgp(cmd: &OpenpgpCmd, debug: bool) -> Result<(), Box<dyn std::error::
                 None => println!("{}", hex_encode(&plain)),
             }
         }
+        OpenpgpCmd::ChangePin {
+            reader,
+            old_pin_env,
+            old_pin_stdin,
+            new_pin_env,
+            new_pin_stdin,
+        } => {
+            // CHANGE REFERENCE DATA carries the old PIN itself — no prior VERIFY.
+            let old = read_secret("old user PIN (PW1)", old_pin_env.as_deref(), *old_pin_stdin)?;
+            let new = read_secret("new user PIN (PW1)", new_pin_env.as_deref(), *new_pin_stdin)?;
+            let mut session = open_openpgp(reader.as_deref(), debug)?;
+            session.change_user_pin(old.as_bytes(), new.as_bytes())?;
+            println!("User PIN (PW1) changed.");
+        }
+        OpenpgpCmd::ChangeAdminPin {
+            reader,
+            old_pin_env,
+            old_pin_stdin,
+            new_pin_env,
+            new_pin_stdin,
+        } => {
+            let old = read_secret("old admin PIN (PW3)", old_pin_env.as_deref(), *old_pin_stdin)?;
+            let new = read_secret("new admin PIN (PW3)", new_pin_env.as_deref(), *new_pin_stdin)?;
+            let mut session = open_openpgp(reader.as_deref(), debug)?;
+            session.change_admin_pin(old.as_bytes(), new.as_bytes())?;
+            println!("Admin PIN (PW3) changed.");
+        }
+        OpenpgpCmd::UnblockPin {
+            reader,
+            admin_pin_env,
+            admin_pin_stdin,
+            new_pin_env,
+            new_pin_stdin,
+        } => {
+            let admin = read_secret(
+                "admin PIN (PW3)",
+                admin_pin_env.as_deref(),
+                *admin_pin_stdin,
+            )?;
+            let new = read_secret("new user PIN (PW1)", new_pin_env.as_deref(), *new_pin_stdin)?;
+            let mut session = open_openpgp(reader.as_deref(), debug)?;
+            // reset_retry_counter verifies PW3 internally, then RESET RETRY
+            // COUNTER sets the new user PIN — don't double-verify here.
+            session.reset_retry_counter(admin.as_bytes(), new.as_bytes())?;
+            println!("User PIN (PW1) unblocked and reset.");
+        }
     }
     Ok(())
 }
@@ -4545,6 +4646,13 @@ mod cli_tests {
         assert!(parse(&["keyroostctl", "fido", "creds-list"]).is_ok());
         assert!(parse(&["keyroostctl", "fido-info"]).is_err());
         assert!(parse(&["keyroostctl", "fido-creds-list"]).is_err());
+    }
+
+    #[test]
+    fn openpgp_pin_commands_parse() {
+        assert!(Cli::try_parse_from(["keyroostctl", "openpgp", "change-pin", "--old-pin-stdin", "--new-pin-stdin"]).is_ok());
+        assert!(Cli::try_parse_from(["keyroostctl", "openpgp", "change-admin-pin", "--old-pin-stdin", "--new-pin-stdin"]).is_ok());
+        assert!(Cli::try_parse_from(["keyroostctl", "openpgp", "unblock-pin", "--admin-pin-stdin", "--new-pin-stdin"]).is_ok());
     }
 
     #[test]
