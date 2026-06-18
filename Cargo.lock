@@ -1642,9 +1642,10 @@ dependencies = [
 
 [[package]]
 name = "keyroost"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "arboard",
+ "base64",
  "eframe",
  "egui",
  "keyroost-ctap",
@@ -1659,12 +1660,15 @@ dependencies = [
  "keyroost-rsakey",
  "keyroost-token2otp",
  "keyroost-transport",
+ "png",
+ "serde",
+ "serde_json",
  "zeroize",
 ]
 
 [[package]]
 name = "keyroost-ctap"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "aes",
  "cbc",
@@ -1679,14 +1683,14 @@ dependencies = [
 
 [[package]]
 name = "keyroost-hid"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "hidapi",
 ]
 
 [[package]]
 name = "keyroost-import"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "aes-gcm",
  "base64",
@@ -1700,7 +1704,7 @@ dependencies = [
 
 [[package]]
 name = "keyroost-keyring"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1708,32 +1712,32 @@ dependencies = [
 
 [[package]]
 name = "keyroost-oath"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "keyroost-proto",
 ]
 
 [[package]]
 name = "keyroost-openpgp"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "keyroost-proto",
 ]
 
 [[package]]
 name = "keyroost-piv"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "keyroost-proto",
 ]
 
 [[package]]
 name = "keyroost-proto"
-version = "0.5.1"
+version = "0.6.0"
 
 [[package]]
 name = "keyroost-qr"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "jpeg-decoder",
  "keyroost-import",
@@ -1744,16 +1748,17 @@ dependencies = [
 
 [[package]]
 name = "keyroost-resolve"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "keyroost-hid",
  "keyroost-keyring",
+ "keyroost-proto",
  "keyroost-transport",
 ]
 
 [[package]]
 name = "keyroost-rsakey"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "rand",
  "rsa",
@@ -1762,7 +1767,7 @@ dependencies = [
 
 [[package]]
 name = "keyroost-token2otp"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "aes",
  "cbc",
@@ -1774,7 +1779,7 @@ dependencies = [
 
 [[package]]
 name = "keyroost-transport"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "aes",
  "cipher",
@@ -1793,7 +1798,7 @@ dependencies = [
 
 [[package]]
 name = "keyroostctl"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "clap",
  "clap_complete",
@@ -1811,6 +1816,8 @@ dependencies = [
  "keyroost-rsakey",
  "keyroost-token2otp",
  "keyroost-transport",
+ "serde",
+ "serde_json",
  "zeroize",
 ]
 

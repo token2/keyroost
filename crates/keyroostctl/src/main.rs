@@ -21,9 +21,224 @@ use keyroost_resolve::{
     read_effective_serial, VID_YUBICO,
 };
 
+mod overview;
+
 /// The global `--name` selector, captured once in `run()` so the FIDO device
 /// resolver can honor it without threading it through every subcommand handler.
 static SELECTED_KEY_NAME: OnceLock<Option<String>> = OnceLock::new();
+
+/// Whether the global `--json` flag was set, captured once in `run()` so the
+/// status/query handlers can switch output without threading it through.
+static JSON_OUTPUT: OnceLock<bool> = OnceLock::new();
+
+fn json_output() -> bool {
+    *JSON_OUTPUT.get().unwrap_or(&false)
+}
+
+/// Pretty-print a serializable value as JSON to stdout (the `--json` path for
+/// the status/query commands).
+fn emit_json<T: serde::Serialize>(value: &T) -> Result<(), Box<dyn std::error::Error>> {
+    println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+
+/// Serializable shapes for the global `--json` output mode. Each struct mirrors
+/// 1:1 the data the corresponding command's human handler already prints — no
+/// new data, only structure.
+mod json_out {
+    use serde::Serialize;
+
+    /// One device in the bare-invocation overview (`keyroostctl --json`).
+    #[derive(Serialize)]
+    pub struct DeviceJson {
+        pub vendor: String,
+        pub model: String,
+        pub name: Option<String>,
+        pub serial: String,
+        pub transport: String,
+        /// "key" or "token".
+        pub kind: &'static str,
+        pub caps: Vec<&'static str>,
+    }
+
+    /// `keyroostctl molto --json info`.
+    #[derive(Serialize)]
+    pub struct MoltoInfoJson {
+        pub serial: String,
+        pub utc: u32,
+        pub drift_seconds: i64,
+    }
+
+    /// `keyroostctl fido --json info` — the CTAP2 authenticatorGetInfo fields the
+    /// human handler prints (plus the CTAPHID transport facts).
+    #[derive(Serialize)]
+    pub struct FidoInfoJson {
+        pub device: String,
+        pub channel_id: u32,
+        pub ctaphid_protocol_version: u8,
+        pub firmware: String,
+        pub hid_caps: Vec<&'static str>,
+        pub hid_caps_raw: u8,
+        /// Present only when the device speaks CTAP2 (CBOR-capable).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub ctap2: Option<Ctap2InfoJson>,
+    }
+
+    /// The authenticatorGetInfo payload (CTAP2 devices only).
+    #[derive(Serialize)]
+    pub struct Ctap2InfoJson {
+        pub versions: Vec<String>,
+        pub extensions: Vec<String>,
+        pub aaguid: String,
+        pub options: Vec<OptionJson>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub max_msg_size: Option<u64>,
+        pub pin_uv_auth_protocols: Vec<u64>,
+        pub transports: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub firmware_version: Option<u64>,
+    }
+
+    /// One authenticator option (e.g. `{ "name": "rk", "value": true }`).
+    #[derive(Serialize)]
+    pub struct OptionJson {
+        pub name: String,
+        pub value: bool,
+    }
+
+    /// `keyroostctl fido --json pin-retries`.
+    #[derive(Serialize)]
+    pub struct FidoPinRetriesJson {
+        pub pin_retries: u32,
+    }
+
+    /// `keyroostctl piv --json status`.
+    #[derive(Serialize)]
+    pub struct PivStatusJson {
+        pub version: Option<String>,
+        pub serial: Option<u32>,
+        pub pin_retries: Option<u8>,
+        pub slots: Vec<PivSlotJson>,
+    }
+
+    /// One PIV key slot in the status output.
+    #[derive(Serialize)]
+    pub struct PivSlotJson {
+        pub slot: String,
+        pub cert_present: bool,
+        pub cert_len: usize,
+    }
+
+    /// `keyroostctl openpgp --json status`.
+    #[derive(Serialize)]
+    pub struct OpenpgpStatusJson {
+        pub aid: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub serial: Option<u32>,
+        pub sig_algo: String,
+        pub dec_algo: String,
+        pub aut_algo: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub fingerprint_sig: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub fingerprint_dec: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub fingerprint_aut: Option<String>,
+        pub pin_retries_pw1: u8,
+        pub pin_retries_rc: u8,
+        pub pin_retries_pw3: u8,
+        pub signature_count: Option<u32>,
+    }
+
+    /// `keyroostctl otp --json serial`.
+    #[derive(Serialize)]
+    pub struct OtpSerialJson {
+        pub serial: String,
+    }
+
+    /// `keyroostctl oath --json list` — one stored OATH credential. Mirrors the
+    /// human line `<name>  [<type>/<algorithm>]`.
+    #[derive(Serialize)]
+    pub struct OathCredentialJson {
+        pub name: String,
+        /// "TOTP" or "HOTP".
+        pub oath_type: &'static str,
+        /// "SHA1" / "SHA256" / "SHA512".
+        pub algorithm: &'static str,
+    }
+
+    /// `keyroostctl oath --json code` — the calculated code. The human handler
+    /// prints only the code; we also carry the credential name that was queried.
+    #[derive(Serialize)]
+    pub struct OathCodeJson {
+        pub name: String,
+        pub code: String,
+    }
+
+    /// `keyroostctl otp --json list` — one Token2 OTP entry. Mirrors the human
+    /// line `<app:account>  [<type>/<algo>]  <code|—>  (touch)?`.
+    #[derive(Serialize)]
+    pub struct OtpEntryJson {
+        pub app: String,
+        pub account: String,
+        /// "TOTP" or "HOTP".
+        pub otp_type: &'static str,
+        /// "SHA1" / "SHA256".
+        pub algorithm: &'static str,
+        /// `None` (JSON `null`) when the code is withheld pending a touch (the
+        /// human shows an em-dash); present otherwise.
+        pub code: Option<String>,
+        pub touch_required: bool,
+    }
+
+    /// `keyroostctl otp --json get` — a single read OTP code.
+    #[derive(Serialize)]
+    pub struct OtpGetJson {
+        pub app: String,
+        pub account: String,
+        pub code: String,
+    }
+
+    /// `keyroostctl fido --json creds-metadata` — resident-credential counts.
+    #[derive(Serialize)]
+    pub struct FidoCredsMetadataJson {
+        pub existing_resident_credentials: u64,
+        pub max_possible_remaining: u64,
+    }
+
+    /// `keyroostctl fido --json creds-list` — the resident credentials grouped
+    /// by relying party.
+    #[derive(Serialize)]
+    pub struct FidoCredsListJson {
+        pub relying_parties: Vec<FidoRelyingPartyJson>,
+    }
+
+    /// One relying party in the creds-list output.
+    #[derive(Serialize)]
+    pub struct FidoRelyingPartyJson {
+        pub rp_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub rp_name: Option<String>,
+        pub credentials: Vec<FidoCredentialJson>,
+    }
+
+    /// One resident credential under a relying party.
+    #[derive(Serialize)]
+    pub struct FidoCredentialJson {
+        /// Full hex credentialId (the value `creds-delete --cred-id` expects).
+        pub credential_id: String,
+        /// The user handle, rendered as UTF-8 (lossy), as the human prints it.
+        pub user_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub user_name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub user_display_name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub algorithm: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub algorithm_name: Option<&'static str>,
+    }
+}
 
 #[derive(Parser)]
 #[command(
@@ -32,22 +247,6 @@ static SELECTED_KEY_NAME: OnceLock<Option<String>> = OnceLock::new();
     about = "Program Token2 Molto2 / Molto2v2 TOTP tokens"
 )]
 struct Cli {
-    /// Customer key as hex (alternative to --key-ascii). Default used if no
-    /// key option is supplied. Argv is visible in `ps` and shell history;
-    /// prefer --key-env for a non-default key.
-    #[arg(long, global = true, value_name = "HEX")]
-    key: Option<String>,
-    /// Customer key as ASCII (alternative to --key). Argv is visible in `ps`
-    /// and shell history; prefer --key-ascii-env for a non-default key.
-    #[arg(long, global = true, value_name = "TEXT", conflicts_with = "key")]
-    key_ascii: Option<String>,
-    /// Read the hex customer key from the named environment variable
-    /// (keeps it out of argv and shell history).
-    #[arg(long, global = true, value_name = "VAR", conflicts_with_all = ["key", "key_ascii"])]
-    key_env: Option<String>,
-    /// Read the ASCII customer key from the named environment variable.
-    #[arg(long, global = true, value_name = "VAR", conflicts_with_all = ["key", "key_ascii", "key_env"])]
-    key_ascii_env: Option<String>,
     /// List available PC/SC readers and exit.
     #[arg(long, global = true)]
     list_readers: bool,
@@ -58,6 +257,10 @@ struct Cli {
     /// Resolves to the device's current path. Mutually exclusive with --path.
     #[arg(long, global = true, value_name = "NAME")]
     name: Option<String>,
+    /// Emit machine-readable JSON instead of human text (where supported: status
+    /// and query commands). Side-effect commands ignore it.
+    #[arg(long, global = true)]
+    json: bool,
 
     #[command(subcommand)]
     command: Option<Cmd>,
@@ -65,174 +268,28 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Print device serial number and on-device UTC time.
-    Info,
     /// Print shell completions to stdout (e.g. `keyroostctl completions bash
     /// > /etc/bash_completion.d/keyroostctl`).
     Completions {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
-    /// Print a man page (troff) to stdout (e.g. `keyroostctl manpage >
-    /// keyroostctl.1`).
-    Manpage,
+    /// Write a set of man pages (keyroostctl.1 + keyroostctl-<group>.1) into a
+    /// directory, e.g. `keyroostctl manpage ./man && man -l ./man/keyroostctl-piv.1`.
+    Manpage {
+        /// Directory to write the .1 files into (created if missing).
+        #[arg(value_name = "DIR")]
+        dir: std::path::PathBuf,
+    },
     /// Diagnose the local environment: PC/SC service, readers, FIDO HID
     /// access, udev rules, registry permissions. Read-only, touches no key.
     Doctor,
-    /// Write a TOTP seed to a profile slot. The seed can come from argv
-    /// (--hex/--base32 — visible in `ps` and shell history), an environment
-    /// variable, or stdin; supply exactly one source.
-    SetSeed {
-        /// Profile index 0..=99.
-        #[arg(short, long)]
-        profile: u8,
-        /// Seed in hex. Argv is visible in `ps` and shell history; prefer
-        /// --hex-env or --hex-stdin.
-        #[arg(long, conflicts_with = "base32", value_name = "HEX")]
-        hex: Option<String>,
-        /// Seed in base32 (RFC 4648; whitespace and dashes tolerated). Argv
-        /// is visible in `ps` and shell history; prefer --base32-env or
-        /// --base32-stdin.
-        #[arg(long, value_name = "B32")]
-        base32: Option<String>,
-        /// Read the hex seed from the named environment variable.
-        #[arg(long, value_name = "VAR")]
-        hex_env: Option<String>,
-        /// Read the base32 seed from the named environment variable.
-        #[arg(long, value_name = "VAR")]
-        base32_env: Option<String>,
-        /// Read the hex seed from stdin (one line).
-        #[arg(long)]
-        hex_stdin: bool,
-        /// Read the base32 seed from stdin (one line).
-        #[arg(long)]
-        base32_stdin: bool,
-    },
-    /// Write a profile title (1..=12 ASCII chars).
-    SetTitle {
-        #[arg(short, long)]
-        profile: u8,
-        title: String,
-    },
-    /// Set profile TOTP configuration (and seed the clock with the host's UTC time).
-    Configure {
-        #[arg(short, long)]
-        profile: u8,
-        #[arg(long, value_enum, default_value_t = AlgoArg::Sha1)]
-        algorithm: AlgoArg,
-        #[arg(long, value_enum, default_value_t = DigitsArg::Six)]
-        digits: DigitsArg,
-        #[arg(long, value_enum, default_value_t = StepArg::S30)]
-        time_step: StepArg,
-        #[arg(long, value_enum, default_value_t = TimeoutArg::S30)]
-        display_timeout: TimeoutArg,
-    },
-    /// Push the host's current UTC time to one profile (or all profiles).
-    SyncTime {
-        /// Sync only this profile (omit `--all`).
-        #[arg(short, long, conflicts_with = "all")]
-        profile: Option<u8>,
-        /// Sync time on every profile 0..=99.
-        #[arg(long)]
-        all: bool,
-    },
-    /// Rotate the device's customer key (requires physical button
-    /// confirmation). The new key can come from argv (--hex/--ascii —
-    /// visible in `ps` and shell history), an environment variable, or
-    /// stdin; supply exactly one source.
-    SetCustomerKey {
-        /// New key in hex. Argv is visible in `ps` and shell history;
-        /// prefer --hex-env or --hex-stdin.
-        #[arg(long, conflicts_with = "ascii", value_name = "HEX")]
-        hex: Option<String>,
-        /// New key as ASCII. Argv is visible in `ps` and shell history;
-        /// prefer --ascii-env or --ascii-stdin.
-        #[arg(long, value_name = "TEXT")]
-        ascii: Option<String>,
-        /// Read the new hex key from the named environment variable.
-        #[arg(long, value_name = "VAR")]
-        hex_env: Option<String>,
-        /// Read the new ASCII key from the named environment variable.
-        #[arg(long, value_name = "VAR")]
-        ascii_env: Option<String>,
-        /// Read the new hex key from stdin (one line).
-        #[arg(long)]
-        hex_stdin: bool,
-        /// Read the new ASCII key from stdin (one line).
-        #[arg(long)]
-        ascii_stdin: bool,
-    },
-    /// Import an otpauth:// URI to a profile: writes seed, title, and config in one go.
-    Import {
-        #[arg(short, long)]
-        profile: u8,
-        /// Override the profile title (default: derived from URI issuer/account).
-        #[arg(long)]
-        title: Option<String>,
-        /// Display timeout in seconds (otpauth:// has no equivalent field).
-        #[arg(long, value_enum, default_value_t = TimeoutArg::S30)]
-        display_timeout: TimeoutArg,
-        /// Decode the otpauth:// URI from a QR code in a PNG/JPEG screenshot
-        /// instead of passing it as text. For Google Authenticator export
-        /// QRs (multiple accounts), use `import-file` with the image path.
-        #[arg(long, value_name = "IMAGE", conflicts_with = "uri")]
-        qr: Option<std::path::PathBuf>,
-        /// The otpauth:// URI. Use single quotes to protect & from the shell.
-        /// Argv is visible in `ps` and shell history (the URI embeds the
-        /// secret); pass `-` to read the URI from stdin, or use --qr.
-        uri: Option<String>,
-    },
-    /// Bulk-import a plaintext or encrypted export from Aegis, 2FAS, or a list
-    /// of otpauth:// URIs. For encrypted Aegis vaults, pass the password via
-    /// `--password-stdin` (suitable for piping from a file or password manager)
-    /// or `--password-env VAR`.
-    ImportFile {
-        /// Path to the export file. Format is auto-detected.
-        path: std::path::PathBuf,
-        /// Starting profile index. Entries fill consecutive slots from here.
-        #[arg(long, default_value_t = 0)]
-        start: u8,
-        /// Display timeout to use for every imported entry.
-        #[arg(long, value_enum, default_value_t = TimeoutArg::S30)]
-        display_timeout: TimeoutArg,
-        /// Print what would be written, but don't touch the device.
-        #[arg(long)]
-        dry_run: bool,
-        /// Read the vault password from stdin (single line, no trailing newline).
-        #[arg(long, conflicts_with = "password_env")]
-        password_stdin: bool,
-        /// Read the vault password from the named environment variable.
-        #[arg(long, value_name = "VAR")]
-        password_env: Option<String>,
-    },
-    /// Sweep plausible read APDUs against the device and report what the firmware
-    /// recognizes. Read-only by intent — sends short read-style requests with
-    /// destructive INS bytes (set seed/title/config, factory reset, set customer
-    /// key) excluded by default.
-    Probe {
-        /// Confirm you understand this sends ~256–512 experimental APDUs.
-        #[arg(long)]
-        yes: bool,
-        /// Also probe the secure class (CLA 0x84) after authenticating. Without
-        /// this, only CLA 0x80 is scanned (no auth needed).
-        #[arg(long)]
-        authed: bool,
-        /// Override the safety filter and scan every INS byte 0x00..0xFF.
-        /// Only useful if you've already exhausted the safe sweep.
-        #[arg(long)]
-        include_destructive: bool,
-        /// Profile slot to use in P2 for `authed` scans (P2 is the profile index
-        /// for the known secure commands). Defaults to a high, presumably-unused
-        /// slot.
-        #[arg(long, default_value_t = 99)]
-        slot: u8,
-    },
-    /// Factory-reset the device. Wipes profiles and restores default customer key.
-    /// Requires physical button confirmation on the device.
-    FactoryReset {
-        /// Confirm you really want to wipe the device.
-        #[arg(long)]
-        yes: bool,
+    /// Token2 Molto2 / Molto2v2 programmable TOTP token.
+    Molto {
+        #[command(flatten)]
+        key: KeyArgs,
+        #[command(subcommand)]
+        cmd: MoltoCmd,
     },
     /// List connected devices: PC/SC readers and FIDO HID authenticators.
     List {
@@ -240,83 +297,10 @@ enum Cmd {
         #[arg(long)]
         all_hid: bool,
     },
-    /// Run `authenticatorGetInfo` against a connected FIDO authenticator.
-    FidoInfo {
-        /// hidraw path to use. If omitted, auto-pick the only connected FIDO device.
-        #[arg(long, value_name = "PATH")]
-        path: Option<std::path::PathBuf>,
-    },
-    /// Run `authenticatorReset`, wiping all credentials on the key.
-    ///
-    /// Most authenticators only accept Reset within ~10s of plug-in and
-    /// require a physical touch. If `--yes` is missing this is a no-op.
-    FidoReset {
-        /// Confirm you really want to wipe credentials.
-        #[arg(long)]
-        yes: bool,
-        /// hidraw path to use. If omitted, auto-pick the only connected FIDO device.
-        #[arg(long, value_name = "PATH")]
-        path: Option<std::path::PathBuf>,
-    },
-    /// Print the current PIN retry counter.
-    FidoPinRetries {
-        #[arg(long, value_name = "PATH")]
-        path: Option<std::path::PathBuf>,
-    },
-    /// Set the initial PIN on an authenticator that doesn't have one yet.
-    FidoPinSet {
-        /// Read the new PIN from the given environment variable.
-        #[arg(long, value_name = "VAR", conflicts_with = "new_pin_stdin")]
-        new_pin_env: Option<String>,
-        /// Read the new PIN from stdin (one line, trailing newline stripped).
-        #[arg(long)]
-        new_pin_stdin: bool,
-        #[arg(long, value_name = "PATH")]
-        path: Option<std::path::PathBuf>,
-    },
-    /// Change the existing PIN. Old and new PINs are sourced from env vars
-    /// or stdin (stdin reads two consecutive lines: old then new).
-    FidoPinChange {
-        #[arg(long, value_name = "VAR", conflicts_with = "old_pin_stdin")]
-        old_pin_env: Option<String>,
-        #[arg(long)]
-        old_pin_stdin: bool,
-        #[arg(long, value_name = "VAR", conflicts_with = "new_pin_stdin")]
-        new_pin_env: Option<String>,
-        #[arg(long)]
-        new_pin_stdin: bool,
-        #[arg(long, value_name = "PATH")]
-        path: Option<std::path::PathBuf>,
-    },
-    /// Show resident-credential storage stats (uses pinUvAuthToken).
-    FidoCredsMetadata {
-        #[arg(long, value_name = "VAR", conflicts_with = "pin_stdin")]
-        pin_env: Option<String>,
-        #[arg(long)]
-        pin_stdin: bool,
-        #[arg(long, value_name = "PATH")]
-        path: Option<std::path::PathBuf>,
-    },
-    /// List every resident credential on the authenticator, grouped by RP.
-    FidoCredsList {
-        #[arg(long, value_name = "VAR", conflicts_with = "pin_stdin")]
-        pin_env: Option<String>,
-        #[arg(long)]
-        pin_stdin: bool,
-        #[arg(long, value_name = "PATH")]
-        path: Option<std::path::PathBuf>,
-    },
-    /// Delete a single resident credential by its hex-encoded credentialId.
-    FidoCredsDelete {
-        /// Hex-encoded credentialId as printed by `fido-creds-list`.
-        #[arg(long, value_name = "HEX")]
-        cred_id: String,
-        #[arg(long, value_name = "VAR", conflicts_with = "pin_stdin")]
-        pin_env: Option<String>,
-        #[arg(long)]
-        pin_stdin: bool,
-        #[arg(long, value_name = "PATH")]
-        path: Option<std::path::PathBuf>,
+    /// FIDO2 / CTAP2: device info, reset, PIN management, resident credentials.
+    Fido {
+        #[command(subcommand)]
+        cmd: FidoCmd,
     },
     /// Manage friendly names for security keys (opt-in; stored in keys.json).
     KeyName {
@@ -833,6 +817,61 @@ enum OpenpgpCmd {
         #[arg(long, value_name = "SUBSTR")]
         reader: Option<String>,
     },
+    /// Change the user PIN (PW1). PINs are sourced from env vars or stdin
+    /// (stdin reads two consecutive lines: old then new) — never argv.
+    ChangePin {
+        /// Read the old user PIN (PW1) from the named environment variable.
+        #[arg(long, value_name = "VAR", conflicts_with = "old_pin_stdin")]
+        old_pin_env: Option<String>,
+        /// Read the old user PIN (PW1) from stdin (first line).
+        #[arg(long)]
+        old_pin_stdin: bool,
+        /// Read the new user PIN (PW1) from the named environment variable.
+        #[arg(long, value_name = "VAR", conflicts_with = "new_pin_stdin")]
+        new_pin_env: Option<String>,
+        /// Read the new user PIN (PW1) from stdin (second line).
+        #[arg(long)]
+        new_pin_stdin: bool,
+        #[arg(long, value_name = "SUBSTR")]
+        reader: Option<String>,
+    },
+    /// Change the admin PIN (PW3). PINs are sourced from env vars or stdin
+    /// (stdin reads two consecutive lines: old then new) — never argv.
+    ChangeAdminPin {
+        /// Read the old admin PIN (PW3) from the named environment variable.
+        #[arg(long, value_name = "VAR", conflicts_with = "old_pin_stdin")]
+        old_pin_env: Option<String>,
+        /// Read the old admin PIN (PW3) from stdin (first line).
+        #[arg(long)]
+        old_pin_stdin: bool,
+        /// Read the new admin PIN (PW3) from the named environment variable.
+        #[arg(long, value_name = "VAR", conflicts_with = "new_pin_stdin")]
+        new_pin_env: Option<String>,
+        /// Read the new admin PIN (PW3) from stdin (second line).
+        #[arg(long)]
+        new_pin_stdin: bool,
+        #[arg(long, value_name = "SUBSTR")]
+        reader: Option<String>,
+    },
+    /// Unblock the user PIN (PW1) using the admin PIN (PW3), setting a new user
+    /// PIN. Recovers a card whose user PIN is blocked without a factory reset.
+    /// PINs are sourced from env vars or stdin (admin then new) — never argv.
+    UnblockPin {
+        /// Read the admin PIN (PW3) from the named environment variable.
+        #[arg(long, value_name = "VAR", conflicts_with = "admin_pin_stdin")]
+        admin_pin_env: Option<String>,
+        /// Read the admin PIN (PW3) from stdin (first line).
+        #[arg(long)]
+        admin_pin_stdin: bool,
+        /// Read the new user PIN (PW1) from the named environment variable.
+        #[arg(long, value_name = "VAR", conflicts_with = "new_pin_stdin")]
+        new_pin_env: Option<String>,
+        /// Read the new user PIN (PW1) from stdin (second line).
+        #[arg(long)]
+        new_pin_stdin: bool,
+        #[arg(long, value_name = "SUBSTR")]
+        reader: Option<String>,
+    },
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -1046,6 +1085,324 @@ enum OathCmd {
     ClearPassword {
         #[command(flatten)]
         access: OathAccess,
+    },
+}
+
+/// Molto2 customer-key selection (Molto2-scoped; was global pre-0.6.0).
+#[derive(clap::Args)]
+struct KeyArgs {
+    /// Customer key as hex (alternative to --key-ascii). Default used if no
+    /// key option is supplied. Argv is visible in `ps` and shell history;
+    /// prefer --key-env for a non-default key.
+    #[arg(long, global = true, value_name = "HEX")]
+    key: Option<String>,
+    /// Customer key as ASCII (alternative to --key). Argv is visible in `ps`
+    /// and shell history; prefer --key-ascii-env for a non-default key.
+    #[arg(long, global = true, value_name = "TEXT", conflicts_with = "key")]
+    key_ascii: Option<String>,
+    /// Read the hex customer key from the named environment variable
+    /// (keeps it out of argv and shell history).
+    #[arg(long, global = true, value_name = "VAR", conflicts_with_all = ["key", "key_ascii"])]
+    key_env: Option<String>,
+    /// Read the ASCII customer key from the named environment variable.
+    #[arg(long, global = true, value_name = "VAR", conflicts_with_all = ["key", "key_ascii", "key_env"])]
+    key_ascii_env: Option<String>,
+}
+
+/// Token2 Molto2 / Molto2v2 subcommands. These talk to the Molto2 PC/SC
+/// reader, authenticated with the customer key (see the `--key*` flags).
+#[derive(Subcommand)]
+enum MoltoCmd {
+    /// Print device serial number and on-device UTC time.
+    Info,
+    /// Write a TOTP seed to a profile slot. The seed can come from argv
+    /// (--hex/--base32 — visible in `ps` and shell history), an environment
+    /// variable, or stdin; supply exactly one source.
+    Seed {
+        /// Profile index 0..=99.
+        #[arg(short, long)]
+        profile: u8,
+        /// Seed in hex. Argv is visible in `ps` and shell history; prefer
+        /// --hex-env or --hex-stdin.
+        #[arg(long, conflicts_with = "base32", value_name = "HEX")]
+        hex: Option<String>,
+        /// Seed in base32 (RFC 4648; whitespace and dashes tolerated). Argv
+        /// is visible in `ps` and shell history; prefer --base32-env or
+        /// --base32-stdin.
+        #[arg(long, value_name = "B32")]
+        base32: Option<String>,
+        /// Read the hex seed from the named environment variable.
+        #[arg(long, value_name = "VAR")]
+        hex_env: Option<String>,
+        /// Read the base32 seed from the named environment variable.
+        #[arg(long, value_name = "VAR")]
+        base32_env: Option<String>,
+        /// Read the hex seed from stdin (one line).
+        #[arg(long)]
+        hex_stdin: bool,
+        /// Read the base32 seed from stdin (one line).
+        #[arg(long)]
+        base32_stdin: bool,
+    },
+    /// Write a profile title (1..=12 ASCII chars).
+    Title {
+        #[arg(short, long)]
+        profile: u8,
+        title: String,
+    },
+    /// Set profile TOTP configuration (and seed the clock with the host's UTC time).
+    Config {
+        #[arg(short, long)]
+        profile: u8,
+        #[arg(long, value_enum, default_value_t = AlgoArg::Sha1)]
+        algorithm: AlgoArg,
+        #[arg(long, value_enum, default_value_t = DigitsArg::Six)]
+        digits: DigitsArg,
+        #[arg(long, value_enum, default_value_t = StepArg::S30)]
+        time_step: StepArg,
+        #[arg(long, value_enum, default_value_t = TimeoutArg::S30)]
+        display_timeout: TimeoutArg,
+    },
+    /// Push the host's current UTC time to one profile (or all profiles).
+    SyncTime {
+        /// Sync only this profile (omit `--all`).
+        #[arg(short, long, conflicts_with = "all")]
+        profile: Option<u8>,
+        /// Sync time on every profile 0..=99.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Rotate the device's customer key (requires physical button
+    /// confirmation). The new key can come from argv (--hex/--ascii —
+    /// visible in `ps` and shell history), an environment variable, or
+    /// stdin; supply exactly one source.
+    CustomerKey {
+        /// New key in hex. Argv is visible in `ps` and shell history;
+        /// prefer --hex-env or --hex-stdin.
+        #[arg(long, conflicts_with = "ascii", value_name = "HEX")]
+        hex: Option<String>,
+        /// New key as ASCII. Argv is visible in `ps` and shell history;
+        /// prefer --ascii-env or --ascii-stdin.
+        #[arg(long, value_name = "TEXT")]
+        ascii: Option<String>,
+        /// Read the new hex key from the named environment variable.
+        #[arg(long, value_name = "VAR")]
+        hex_env: Option<String>,
+        /// Read the new ASCII key from the named environment variable.
+        #[arg(long, value_name = "VAR")]
+        ascii_env: Option<String>,
+        /// Read the new hex key from stdin (one line).
+        #[arg(long)]
+        hex_stdin: bool,
+        /// Read the new ASCII key from stdin (one line).
+        #[arg(long)]
+        ascii_stdin: bool,
+    },
+    /// Import an otpauth:// URI to a profile: writes seed, title, and config in one go.
+    Import {
+        #[arg(short, long)]
+        profile: u8,
+        /// Override the profile title (default: derived from URI issuer/account).
+        #[arg(long)]
+        title: Option<String>,
+        /// Display timeout in seconds (otpauth:// has no equivalent field).
+        #[arg(long, value_enum, default_value_t = TimeoutArg::S30)]
+        display_timeout: TimeoutArg,
+        /// Decode the otpauth:// URI from a QR code in a PNG/JPEG screenshot
+        /// instead of passing it as text. For Google Authenticator export
+        /// QRs (multiple accounts), use `import-file` with the image path.
+        #[arg(long, value_name = "IMAGE", conflicts_with = "uri")]
+        qr: Option<std::path::PathBuf>,
+        /// The otpauth:// URI. Use single quotes to protect & from the shell.
+        /// Argv is visible in `ps` and shell history (the URI embeds the
+        /// secret); pass `-` to read the URI from stdin, or use --qr.
+        uri: Option<String>,
+    },
+    /// Bulk-import a plaintext or encrypted export from Aegis, 2FAS, or a list
+    /// of otpauth:// URIs. For encrypted Aegis vaults, pass the password via
+    /// `--password-stdin` (suitable for piping from a file or password manager)
+    /// or `--password-env VAR`.
+    ImportFile {
+        /// Path to the export file. Format is auto-detected.
+        path: std::path::PathBuf,
+        /// Starting profile index. Entries fill consecutive slots from here.
+        #[arg(long, default_value_t = 0)]
+        start: u8,
+        /// Display timeout to use for every imported entry.
+        #[arg(long, value_enum, default_value_t = TimeoutArg::S30)]
+        display_timeout: TimeoutArg,
+        /// Print what would be written, but don't touch the device.
+        #[arg(long)]
+        dry_run: bool,
+        /// Read the vault password from stdin (single line, no trailing newline).
+        #[arg(long, conflicts_with = "password_env")]
+        password_stdin: bool,
+        /// Read the vault password from the named environment variable.
+        #[arg(long, value_name = "VAR")]
+        password_env: Option<String>,
+    },
+    /// Sweep plausible read APDUs against the device and report what the firmware
+    /// recognizes. Read-only by intent — sends short read-style requests with
+    /// destructive INS bytes (set seed/title/config, factory reset, set customer
+    /// key) excluded by default.
+    #[command(hide = true)]
+    Probe {
+        /// Confirm you understand this sends ~256–512 experimental APDUs.
+        #[arg(long)]
+        yes: bool,
+        /// Also probe the secure class (CLA 0x84) after authenticating. Without
+        /// this, only CLA 0x80 is scanned (no auth needed).
+        #[arg(long)]
+        authed: bool,
+        /// Override the safety filter and scan every INS byte 0x00..0xFF.
+        /// Only useful if you've already exhausted the safe sweep.
+        #[arg(long)]
+        include_destructive: bool,
+        /// Profile slot to use in P2 for `authed` scans (P2 is the profile index
+        /// for the known secure commands). Defaults to a high, presumably-unused
+        /// slot.
+        #[arg(long, default_value_t = 99)]
+        slot: u8,
+    },
+    /// Factory-reset the device. Wipes profiles and restores default customer key.
+    /// Requires physical button confirmation on the device.
+    Reset {
+        /// Confirm you really want to wipe the device.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+/// FIDO2 / CTAP2 subcommands. These talk to a hidraw device, not the Molto2
+/// PC/SC reader.
+#[derive(Subcommand)]
+enum FidoCmd {
+    /// Run `authenticatorGetInfo` against a connected FIDO authenticator.
+    Info {
+        /// hidraw path to use. If omitted, auto-pick the only connected FIDO device.
+        #[arg(long, value_name = "PATH")]
+        path: Option<std::path::PathBuf>,
+    },
+    /// Run `authenticatorReset`, wiping all credentials on the key.
+    ///
+    /// Most authenticators only accept Reset within ~10s of plug-in and
+    /// require a physical touch. If `--yes` is missing this is a no-op.
+    Reset {
+        /// Confirm you really want to wipe credentials.
+        #[arg(long)]
+        yes: bool,
+        /// hidraw path to use. If omitted, auto-pick the only connected FIDO device.
+        #[arg(long, value_name = "PATH")]
+        path: Option<std::path::PathBuf>,
+    },
+    /// Print the current PIN retry counter.
+    PinRetries {
+        #[arg(long, value_name = "PATH")]
+        path: Option<std::path::PathBuf>,
+    },
+    /// Set the initial PIN on an authenticator that doesn't have one yet.
+    PinSet {
+        /// Read the new PIN from the given environment variable.
+        #[arg(long, value_name = "VAR", conflicts_with = "new_pin_stdin")]
+        new_pin_env: Option<String>,
+        /// Read the new PIN from stdin (one line, trailing newline stripped).
+        #[arg(long)]
+        new_pin_stdin: bool,
+        #[arg(long, value_name = "PATH")]
+        path: Option<std::path::PathBuf>,
+    },
+    /// Change the existing PIN. Old and new PINs are sourced from env vars
+    /// or stdin (stdin reads two consecutive lines: old then new).
+    PinChange {
+        #[arg(long, value_name = "VAR", conflicts_with = "old_pin_stdin")]
+        old_pin_env: Option<String>,
+        #[arg(long)]
+        old_pin_stdin: bool,
+        #[arg(long, value_name = "VAR", conflicts_with = "new_pin_stdin")]
+        new_pin_env: Option<String>,
+        #[arg(long)]
+        new_pin_stdin: bool,
+        #[arg(long, value_name = "PATH")]
+        path: Option<std::path::PathBuf>,
+    },
+    /// Show resident-credential storage stats (uses pinUvAuthToken).
+    CredsMetadata {
+        #[arg(long, value_name = "VAR", conflicts_with = "pin_stdin")]
+        pin_env: Option<String>,
+        #[arg(long)]
+        pin_stdin: bool,
+        #[arg(long, value_name = "PATH")]
+        path: Option<std::path::PathBuf>,
+    },
+    /// List every resident credential on the authenticator, grouped by RP.
+    CredsList {
+        #[arg(long, value_name = "VAR", conflicts_with = "pin_stdin")]
+        pin_env: Option<String>,
+        #[arg(long)]
+        pin_stdin: bool,
+        #[arg(long, value_name = "PATH")]
+        path: Option<std::path::PathBuf>,
+    },
+    /// Delete a single resident credential by its hex-encoded credentialId.
+    CredsDelete {
+        /// Hex-encoded credentialId as printed by `fido creds-list`.
+        #[arg(long, value_name = "HEX")]
+        cred_id: String,
+        #[arg(long, value_name = "VAR", conflicts_with = "pin_stdin")]
+        pin_env: Option<String>,
+        #[arg(long)]
+        pin_stdin: bool,
+        #[arg(long, value_name = "PATH")]
+        path: Option<std::path::PathBuf>,
+    },
+    /// List enrolled fingerprints (template id + name).
+    FingerprintList {
+        #[arg(long, value_name = "VAR", conflicts_with = "pin_stdin")]
+        pin_env: Option<String>,
+        #[arg(long)]
+        pin_stdin: bool,
+        #[arg(long, value_name = "PATH")]
+        path: Option<std::path::PathBuf>,
+    },
+    /// Enroll a new fingerprint. Touch the sensor repeatedly when prompted until
+    /// capture completes.
+    FingerprintEnroll {
+        /// Optional friendly name to set on the new fingerprint once enrolled.
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+        #[arg(long, value_name = "VAR", conflicts_with = "pin_stdin")]
+        pin_env: Option<String>,
+        #[arg(long)]
+        pin_stdin: bool,
+        #[arg(long, value_name = "PATH")]
+        path: Option<std::path::PathBuf>,
+    },
+    /// Rename an enrolled fingerprint by its hex template id (from `list`).
+    FingerprintRename {
+        /// Hex-encoded template id as printed by `fido fingerprint-list`.
+        #[arg(long, value_name = "HEX")]
+        template_id: String,
+        /// New friendly name.
+        #[arg(long, value_name = "NAME")]
+        name: String,
+        #[arg(long, value_name = "VAR", conflicts_with = "pin_stdin")]
+        pin_env: Option<String>,
+        #[arg(long)]
+        pin_stdin: bool,
+        #[arg(long, value_name = "PATH")]
+        path: Option<std::path::PathBuf>,
+    },
+    /// Delete an enrolled fingerprint by its hex template id (from `list`).
+    FingerprintDelete {
+        /// Hex-encoded template id as printed by `fido fingerprint-list`.
+        #[arg(long, value_name = "HEX")]
+        template_id: String,
+        #[arg(long, value_name = "VAR", conflicts_with = "pin_stdin")]
+        pin_env: Option<String>,
+        #[arg(long)]
+        pin_stdin: bool,
+        #[arg(long, value_name = "PATH")]
+        path: Option<std::path::PathBuf>,
     },
 }
 
@@ -1310,22 +1667,22 @@ impl TimeoutArg {
     }
 }
 
-fn customer_key_bytes(cli: &Cli) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
+fn customer_key_bytes(args: &KeyArgs) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
     use zeroize::Zeroizing;
-    if let Some(h) = &cli.key {
+    if let Some(h) = &args.key {
         hex_decode(h)
             .map(Zeroizing::new)
             .map_err(|e| format!("invalid --key hex: {}", e))
-    } else if let Some(s) = &cli.key_ascii {
+    } else if let Some(s) = &args.key_ascii {
         Ok(Zeroizing::new(s.as_bytes().to_vec()))
-    } else if let Some(var) = &cli.key_env {
+    } else if let Some(var) = &args.key_env {
         let h = Zeroizing::new(
             std::env::var(var).map_err(|_| format!("env var {} (--key-env) is not set", var))?,
         );
         hex_decode(&h)
             .map(Zeroizing::new)
             .map_err(|e| format!("invalid hex in --key-env {}: {}", var, e))
-    } else if let Some(var) = &cli.key_ascii_env {
+    } else if let Some(var) = &args.key_ascii_env {
         std::env::var(var)
             .map(|s| Zeroizing::new(s.into_bytes()))
             .map_err(|_| format!("env var {} (--key-ascii-env) is not set", var))
@@ -1425,6 +1782,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Capture --name once so resolve_fido_path() can honor it without threading
     // it through every FIDO subcommand handler.
     let _ = SELECTED_KEY_NAME.set(cli.name.clone());
+    let _ = JSON_OUTPUT.set(cli.json);
 
     if cli.list_readers {
         for r in Session::list_readers()? {
@@ -1434,11 +1792,30 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let Some(cmd) = cli.command.as_ref() else {
-        // No subcommand → show info, mirroring molto2.py's bare-invocation behavior.
-        let mut session = Session::open()?;
-        session.set_debug(cli.debug);
-        let info = session.read_info()?;
-        print_info(&info);
+        // No subcommand → the friendly correlated overview of every connected
+        // device. (The Molto2 serial/clock still lives under `molto info`.)
+        let devices = keyroost_resolve::enumerate()?;
+        if json_output() {
+            use keyroost_resolve::DeviceKind;
+            let out: Vec<json_out::DeviceJson> = devices
+                .iter()
+                .map(|d| json_out::DeviceJson {
+                    vendor: d.vendor.clone(),
+                    model: d.model.clone(),
+                    name: d.name.clone(),
+                    serial: d.serial.clone(),
+                    transport: d.transport.clone(),
+                    kind: match d.kind {
+                        DeviceKind::Key => "key",
+                        DeviceKind::Token => "token",
+                    },
+                    caps: d.cap_badges(),
+                })
+                .collect();
+            emit_json(&out)?;
+            return Ok(());
+        }
+        overview::print_overview(&devices);
         return Ok(());
     };
 
@@ -1449,9 +1826,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         clap_complete::generate(*shell, &mut c, "keyroostctl", &mut std::io::stdout());
         return Ok(());
     }
-    if let Cmd::Manpage = cmd {
+    if let Cmd::Manpage { dir } = cmd {
         use clap::CommandFactory;
-        clap_mangen::Man::new(Cli::command()).render(&mut std::io::stdout())?;
+        std::fs::create_dir_all(dir)?;
+        let top = Cli::command();
+        let render =
+            |c: &clap::Command, file: &std::path::Path| -> Result<(), Box<dyn std::error::Error>> {
+                let mut buf = Vec::new();
+                clap_mangen::Man::new(c.clone()).render(&mut buf)?;
+                std::fs::write(file, buf)?;
+                Ok(())
+            };
+        render(&top, &dir.join("keyroostctl.1"))?;
+        for sub in top.get_subcommands() {
+            let name = format!("keyroostctl-{}.1", sub.get_name());
+            render(sub, &dir.join(name))?;
+        }
+        eprintln!("wrote man pages to {}", dir.display());
         return Ok(());
     }
     if let Cmd::Doctor = cmd {
@@ -1459,8 +1850,63 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    // List touches neither PC/SC card state nor any HID device — just enumerates.
+    if let Cmd::List { all_hid } = cmd {
+        run_list(*all_hid)?;
+        return Ok(());
+    }
+
+    // Friendly-name registry management (reads HID enumeration; opt-in writes).
+    if let Cmd::KeyName { cmd } = cmd {
+        run_key_name(cmd)?;
+        return Ok(());
+    }
+
+    // FIDO commands talk to a hidraw device, not the Molto2 PC/SC reader.
+    if let Cmd::Fido { cmd } = cmd {
+        return run_fido(cmd, cli.debug);
+    }
+
+    // OATH talks to a security key's CCID applet over PC/SC, not the Molto2.
+    if let Cmd::Oath { cmd } = cmd {
+        run_oath(cmd, cli.debug)?;
+        return Ok(());
+    }
+
+    // OpenPGP likewise talks to a security key's CCID applet over PC/SC.
+    if let Cmd::Openpgp { cmd } = cmd {
+        run_openpgp(cmd, cli.debug)?;
+        return Ok(());
+    }
+
+    // PIV is another CCID applet reached over PC/SC.
+    if let Cmd::Piv { cmd } = cmd {
+        run_piv(cmd, cli.debug)?;
+        return Ok(());
+    }
+
+    // Token2 on-device OTP talks to the FIDO key's OTP applet over USB-HID
+    // (with a PC/SC fallback), not the Molto2 — handle it before the Molto2
+    // PC/SC auth flow below.
+    if let Cmd::Otp { cmd, transport } = cmd {
+        run_otp(cmd, *transport, cli.debug)?;
+        return Ok(());
+    }
+
+    // Token2 Molto2 / Molto2v2 commands all talk to the Molto2 PC/SC reader,
+    // authenticated with the customer key (scoped to this group via --key*).
+    if let Cmd::Molto { key, cmd } = cmd {
+        return run_molto(cmd, key, cli.debug);
+    }
+
+    unreachable!("every subcommand is handled above");
+}
+
+/// Dispatch the Token2 Molto2 / Molto2v2 subcommands. The customer key comes
+/// from the Molto2-scoped `--key*` flags (`KeyArgs`), not a global flag.
+fn run_molto(cmd: &MoltoCmd, key: &KeyArgs, debug: bool) -> Result<(), Box<dyn std::error::Error>> {
     // --dry-run on bulk import doesn't need the device at all.
-    if let Cmd::ImportFile {
+    if let MoltoCmd::ImportFile {
         path,
         start,
         display_timeout: _,
@@ -1493,135 +1939,28 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Info is read-only and needs no auth — mirrors the bare-invocation path.
-    if let Cmd::Info = cmd {
+    if let MoltoCmd::Info = cmd {
         let mut session = Session::open()?;
-        session.set_debug(cli.debug);
+        session.set_debug(debug);
         let info = session.read_info()?;
-        print_info(&info);
-        return Ok(());
-    }
-
-    // List touches neither PC/SC card state nor any HID device — just enumerates.
-    if let Cmd::List { all_hid } = cmd {
-        run_list(*all_hid)?;
-        return Ok(());
-    }
-
-    // Friendly-name registry management (reads HID enumeration; opt-in writes).
-    if let Cmd::KeyName { cmd } = cmd {
-        run_key_name(cmd)?;
-        return Ok(());
-    }
-
-    // FIDO commands talk to a hidraw device, not the Molto2 PC/SC reader.
-    if let Cmd::FidoInfo { path } = cmd {
-        run_fido_info(path.as_deref())?;
-        return Ok(());
-    }
-    if let Cmd::FidoReset { yes, path } = cmd {
-        if !*yes {
-            return Err(format!(
-                "refusing to reset FIDO key without --yes (this wipes credentials){}",
-                fido_target_hint(path.as_deref())
-            )
-            .into());
+        if json_output() {
+            emit_json(&json_out::MoltoInfoJson {
+                serial: info.serial.clone(),
+                utc: info.utc_time,
+                drift_seconds: i64::from(info.utc_time) - i64::from(unix_now()),
+            })?;
+            return Ok(());
         }
-        run_fido_reset(path.as_deref())?;
-        return Ok(());
-    }
-    if let Cmd::FidoPinRetries { path } = cmd {
-        run_fido_pin_retries(path.as_deref())?;
-        return Ok(());
-    }
-    if let Cmd::FidoPinSet {
-        new_pin_env,
-        new_pin_stdin,
-        path,
-    } = cmd
-    {
-        let new_pin = read_secret("new PIN", new_pin_env.as_deref(), *new_pin_stdin)?;
-        run_fido_pin_set(path.as_deref(), &new_pin)?;
-        return Ok(());
-    }
-    if let Cmd::FidoPinChange {
-        old_pin_env,
-        old_pin_stdin,
-        new_pin_env,
-        new_pin_stdin,
-        path,
-    } = cmd
-    {
-        let old_pin = read_secret("old PIN", old_pin_env.as_deref(), *old_pin_stdin)?;
-        let new_pin = read_secret("new PIN", new_pin_env.as_deref(), *new_pin_stdin)?;
-        run_fido_pin_change(path.as_deref(), &old_pin, &new_pin)?;
-        return Ok(());
-    }
-    if let Cmd::FidoCredsMetadata {
-        pin_env,
-        pin_stdin,
-        path,
-    } = cmd
-    {
-        let pin = read_secret("PIN", pin_env.as_deref(), *pin_stdin)?;
-        run_fido_creds_metadata(path.as_deref(), &pin)?;
-        return Ok(());
-    }
-    if let Cmd::FidoCredsList {
-        pin_env,
-        pin_stdin,
-        path,
-    } = cmd
-    {
-        let pin = read_secret("PIN", pin_env.as_deref(), *pin_stdin)?;
-        run_fido_creds_list(path.as_deref(), &pin)?;
-        return Ok(());
-    }
-    if let Cmd::FidoCredsDelete {
-        cred_id,
-        pin_env,
-        pin_stdin,
-        path,
-    } = cmd
-    {
-        let pin = read_secret("PIN", pin_env.as_deref(), *pin_stdin)?;
-        let cred_id_bytes =
-            hex_decode(cred_id).map_err(|e| format!("--cred-id is not valid hex: {}", e))?;
-        run_fido_creds_delete(path.as_deref(), &pin, &cred_id_bytes)?;
-        return Ok(());
-    }
-
-    // OATH talks to a security key's CCID applet over PC/SC, not the Molto2.
-    if let Cmd::Oath { cmd } = cmd {
-        run_oath(cmd, cli.debug)?;
-        return Ok(());
-    }
-
-    // OpenPGP likewise talks to a security key's CCID applet over PC/SC.
-    if let Cmd::Openpgp { cmd } = cmd {
-        run_openpgp(cmd, cli.debug)?;
-        return Ok(());
-    }
-
-    // PIV is another CCID applet reached over PC/SC.
-    if let Cmd::Piv { cmd } = cmd {
-        run_piv(cmd, cli.debug)?;
-        return Ok(());
-    }
-
-    // Token2 on-device OTP talks to the FIDO key's OTP applet over USB-HID
-    // (with a PC/SC fallback), not the Molto2 — handle it before the Molto2
-    // PC/SC auth flow below.
-    if let Cmd::Otp { cmd, transport } = cmd {
-        run_otp(cmd, *transport, cli.debug)?;
+        print_info(&info);
         return Ok(());
     }
 
     // Factory reset is a plain CLA 0x80 command and needs no auth. Read the
     // (read-only) device info before the --yes gate so even the refusal names
     // exactly which device would be wiped.
-    if let Cmd::FactoryReset { yes } = cmd {
+    if let MoltoCmd::Reset { yes } = cmd {
         let mut session = Session::open()?;
-        session.set_debug(cli.debug);
+        session.set_debug(debug);
         let info = session.read_info()?;
         print_info(&info);
         if !yes {
@@ -1639,7 +1978,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Probe walks unauth (and optionally auth) APDU space; it doesn't fit the
     // standard "open → auth → run command" flow because each transmission is
     // expected to fail with a non-9000 SW.
-    if let Cmd::Probe {
+    if let MoltoCmd::Probe {
         yes,
         authed,
         include_destructive,
@@ -1647,14 +1986,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     } = cmd
     {
         if !yes {
-            return Err("refusing to probe without --yes (see `keyroostctl probe --help`)".into());
+            return Err(
+                "refusing to probe without --yes (see `keyroostctl molto probe --help`)".into(),
+            );
         }
         let mut session = Session::open()?;
-        session.set_debug(cli.debug);
+        session.set_debug(debug);
         let info = session.read_info()?;
         print_info(&info);
         if *authed {
-            let key = customer_key_bytes(&cli)?;
+            let key = customer_key_bytes(key)?;
             match session.authenticate(&key) {
                 Ok(()) => println!("authenticated"),
                 Err(TransportError::AuthFailed { tries_remaining }) => {
@@ -1671,7 +2012,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let key = customer_key_bytes(&cli)?;
+    let key = customer_key_bytes(key)?;
     // Wire confidentiality for seeds is SM4 keyed off the customer key, and
     // the factory default is public (it ships in every unit and in this
     // source). Programming real seeds under it means anyone holding a USB
@@ -1679,17 +2020,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if key.as_slice() == DEFAULT_CUSTOMER_KEY
         && matches!(
             cmd,
-            Cmd::SetSeed { .. } | Cmd::Import { .. } | Cmd::ImportFile { .. }
+            MoltoCmd::Seed { .. } | MoltoCmd::Import { .. } | MoltoCmd::ImportFile { .. }
         )
     {
         eprintln!(
             "warning: using the factory-default customer key — seeds sent to the \
              device are decryptable by anyone who captures the USB traffic. \
-             Rotate it first: keyroostctl set-customer-key (see --help)."
+             Rotate it first: keyroostctl molto customer-key (see --help)."
         );
     }
     let mut session = Session::open()?;
-    session.set_debug(cli.debug);
+    session.set_debug(debug);
     let info = session.read_info()?;
     print_info(&info);
     match session.authenticate(&key) {
@@ -1705,11 +2046,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     match cmd {
-        Cmd::Info => unreachable!("handled above before auth"),
-        Cmd::Completions { .. } | Cmd::Manpage | Cmd::Doctor => {
-            unreachable!("handled above before auth")
-        }
-        Cmd::SetSeed {
+        MoltoCmd::Info => unreachable!("handled above before auth"),
+        MoltoCmd::Seed {
             profile,
             hex,
             base32,
@@ -1748,14 +2086,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             session.set_seed(*profile, &seed)?;
             println!("seed written to profile #{}", profile);
         }
-        Cmd::SetTitle { profile, title } => {
+        MoltoCmd::Title { profile, title } => {
             if title.is_empty() || title.len() > 12 {
                 return Err("title must be 1..=12 bytes".into());
             }
             session.set_title(*profile, title)?;
             println!("title set on profile #{}", profile);
         }
-        Cmd::Configure {
+        MoltoCmd::Config {
             profile,
             algorithm,
             digits,
@@ -1772,7 +2110,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             session.set_config(*profile, &cfg)?;
             println!("profile #{} configured", profile);
         }
-        Cmd::SyncTime { profile, all } => {
+        MoltoCmd::SyncTime { profile, all } => {
             if *all {
                 for p in 0..=99u8 {
                     match session.sync_time(p, unix_now()) {
@@ -1787,7 +2125,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 return Err("sync-time requires --profile <N> or --all".into());
             }
         }
-        Cmd::SetCustomerKey {
+        MoltoCmd::CustomerKey {
             hex,
             ascii,
             hex_env,
@@ -1822,7 +2160,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             session.set_customer_key(&new_key)?;
             println!("customer-key rotation requested. Press the up-arrow button on the device to confirm.");
         }
-        Cmd::Import {
+        MoltoCmd::Import {
             profile,
             title,
             display_timeout,
@@ -1908,7 +2246,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
         }
-        Cmd::ImportFile {
+        MoltoCmd::ImportFile {
             path,
             start,
             display_timeout,
@@ -1964,24 +2302,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             println!("done");
         }
-        Cmd::FactoryReset { .. } => unreachable!("handled above before auth"),
-        Cmd::Probe { .. } => unreachable!("handled above before auth"),
-        Cmd::List { .. } => unreachable!("handled above before auth"),
-        Cmd::KeyName { .. } => unreachable!("handled above before auth"),
-        Cmd::Oath { .. } => unreachable!("handled above before auth"),
-        Cmd::Openpgp { .. } => unreachable!("handled above before auth"),
-        Cmd::Piv { .. } => unreachable!("handled above before auth"),
-        Cmd::Otp { .. } => unreachable!("handled above before auth"),
-        Cmd::FidoInfo { .. }
-        | Cmd::FidoReset { .. }
-        | Cmd::FidoPinRetries { .. }
-        | Cmd::FidoPinSet { .. }
-        | Cmd::FidoPinChange { .. }
-        | Cmd::FidoCredsMetadata { .. }
-        | Cmd::FidoCredsList { .. }
-        | Cmd::FidoCredsDelete { .. } => {
-            unreachable!("FIDO commands handled above before PC/SC auth")
-        }
+        MoltoCmd::Reset { .. } => unreachable!("handled above before auth"),
+        MoltoCmd::Probe { .. } => unreachable!("handled above before auth"),
     }
     Ok(())
 }
@@ -2124,33 +2446,38 @@ fn run_list(all_hid: bool) -> Result<(), Box<dyn std::error::Error>> {
 
     println!();
     println!("Applet probe (per reader):");
-    match keyroost_transport::probe_readers() {
-        Ok(probes) if probes.is_empty() => println!("  (no readers)"),
-        Ok(probes) => {
-            for p in probes {
-                if p.is_molto2 {
-                    println!("  {}  [Molto2 token]", p.reader_name);
-                    continue;
-                }
-                let mut applets = Vec::new();
-                if p.has_oath {
-                    applets.push("OATH");
-                }
-                if p.has_openpgp {
-                    applets.push("OpenPGP");
-                }
-                if p.has_piv {
-                    applets.push("PIV");
-                }
-                let list = if applets.is_empty() {
-                    "(none detected)".to_string()
-                } else {
-                    applets.join(", ")
-                };
-                println!("  {}  ->  {}", p.reader_name, list);
-            }
+    let (probes, probe_ok) = match keyroost_transport::probe_readers() {
+        Ok(p) => (p, true),
+        Err(e) => {
+            println!("  (unavailable: {})", e);
+            (Vec::new(), false)
         }
-        Err(e) => println!("  (unavailable: {})", e),
+    };
+    if probe_ok && probes.is_empty() {
+        println!("  (no readers)");
+    } else if probe_ok {
+        for p in &probes {
+            if p.is_molto2 {
+                println!("  {}  [Molto2 token]", p.reader_name);
+                continue;
+            }
+            let mut applets = Vec::new();
+            if p.has_oath {
+                applets.push("OATH");
+            }
+            if p.has_openpgp {
+                applets.push("OpenPGP");
+            }
+            if p.has_piv {
+                applets.push("PIV");
+            }
+            let list = if applets.is_empty() {
+                "(none detected)".to_string()
+            } else {
+                applets.join(", ")
+            };
+            println!("  {}  ->  {}", p.reader_name, list);
+        }
     }
 
     println!();
@@ -2160,58 +2487,73 @@ fn run_list(all_hid: bool) -> Result<(), Box<dyn std::error::Error>> {
         "FIDO HID devices:"
     };
     println!("{}", header);
-    match keyroost_hid::enumerate() {
-        Ok(devices) => {
-            let filtered: Vec<_> = devices
-                .into_iter()
-                .filter(|d| all_hid || d.is_fido())
-                .collect();
-            if filtered.is_empty() {
-                println!("  (none)");
-                if let Some(bl) = keyroost_hid::bootloader_device_present() {
-                    println!("  note: detected {bl} — re-plug it to return to application mode.");
-                }
-            } else {
-                let keyring = Keyring::load_default().unwrap_or_default();
-                let ccid = ccid_readers_if_needed(&filtered);
-                for d in &filtered {
-                    let tag = if d.is_fido() {
-                        " [FIDO]"
-                    } else if d.bootloader_label().is_some() {
-                        " [bootloader]"
-                    } else {
-                        ""
-                    };
-                    let eff = d
-                        .serial_number
-                        .clone()
-                        .or_else(|| ccid_serial_for(d, &ccid));
-                    let serial = match (&d.serial_number, &eff) {
-                        (Some(s), _) => format!(" serial={}", s),
-                        (None, Some(s)) => format!(" serial={}(ccid)", s),
-                        (None, None) => String::new(),
-                    };
-                    let name = keyring
-                        .name_for(eff.as_deref())
-                        .map(|n| format!(" name={}", n))
-                        .unwrap_or_default();
-                    println!(
-                        "  {} {:04x}:{:04x} usage={:04x}:{:04x} {}{}{}{}",
-                        d.path.display(),
-                        d.vendor_id,
-                        d.product_id,
-                        d.usage_page,
-                        d.usage,
-                        d.product_name,
-                        serial,
-                        name,
-                        tag,
-                    );
-                }
+    let (hids, hids_ok) = match keyroost_hid::enumerate() {
+        Ok(d) => (d, true),
+        Err(e) => {
+            println!("  (unavailable: {})", e);
+            (Vec::new(), false)
+        }
+    };
+    let keyring = Keyring::load_default().unwrap_or_default();
+    if hids_ok {
+        let filtered: Vec<_> = hids.iter().filter(|d| all_hid || d.is_fido()).collect();
+        if filtered.is_empty() {
+            println!("  (none)");
+            if let Some(bl) = keyroost_hid::bootloader_device_present() {
+                println!("  note: detected {bl} — re-plug it to return to application mode.");
+            }
+        } else {
+            let ccid = ccid_readers_if_needed(&hids);
+            for d in &filtered {
+                let tag = if d.is_fido() {
+                    " [FIDO]"
+                } else if d.bootloader_label().is_some() {
+                    " [bootloader]"
+                } else {
+                    ""
+                };
+                let eff = d
+                    .serial_number
+                    .clone()
+                    .or_else(|| ccid_serial_for(d, &ccid));
+                let serial = match (&d.serial_number, &eff) {
+                    (Some(s), _) => format!(" serial={}", s),
+                    (None, Some(s)) => format!(" serial={}(ccid)", s),
+                    (None, None) => String::new(),
+                };
+                let name = keyring
+                    .name_for(eff.as_deref())
+                    .map(|n| format!(" name={}", n))
+                    .unwrap_or_default();
+                let model = if d.vendor_id == keyroost_proto::USB_VID {
+                    keyroost_proto::token2_pid_label(d.product_id)
+                        .map(|l| format!("{} [{}]", d.product_name, l))
+                        .unwrap_or_else(|| d.product_name.clone())
+                } else {
+                    d.product_name.clone()
+                };
+                println!(
+                    "  {} {:04x}:{:04x} usage={:04x}:{:04x} {}{}{}{}",
+                    d.path.display(),
+                    d.vendor_id,
+                    d.product_id,
+                    d.usage_page,
+                    d.usage,
+                    model,
+                    serial,
+                    name,
+                    tag,
+                );
             }
         }
-        Err(e) => println!("  (unavailable: {})", e),
     }
+
+    // Correlated summary — built from the SAME hid+probe snapshot via the pure
+    // correlate(), so the raw sections above and this decision can't disagree.
+    println!();
+    let devices = keyroost_resolve::correlate(&hids, &probes, &keyring);
+    overview::print_correlated(&devices);
+
     Ok(())
 }
 
@@ -2248,6 +2590,30 @@ fn fido_target_hint(path: Option<&Path>) -> String {
             " — {} FIDO keys connected; pass --name or --path to choose",
             many.len()
         ),
+    }
+}
+
+/// Resolve the global `--name` (if set) to a PC/SC reader name via the shared
+/// device model, so `--name` targets smart-card / Molto2 groups the same way
+/// `--reader` does. Returns the reader substring to match, or None when no
+/// `--name` was given. Errors if a name is set but resolves to no PC/SC reader.
+fn reader_from_name() -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let Some(name) = SELECTED_KEY_NAME.get().and_then(|o| o.clone()) else {
+        return Ok(None);
+    };
+    let devices = keyroost_resolve::enumerate()?;
+    let dev = devices
+        .iter()
+        .find(|d| d.name.as_deref() == Some(name.as_str()))
+        .ok_or_else(|| {
+            format!("no connected device is named '{name}' (see `keyroostctl key-name list`)")
+        })?;
+    match &dev.reader {
+        Some(r) => Ok(Some(r.clone())),
+        None => Err(format!(
+            "device '{name}' has no smart-card (PC/SC) interface for this command"
+        )
+        .into()),
     }
 }
 
@@ -2459,7 +2825,8 @@ fn open_oath(
     access: &OathAccess,
     debug: bool,
 ) -> Result<keyroost_transport::OathSession, Box<dyn std::error::Error>> {
-    let name = resolve_oath_reader(access.reader.as_deref())?;
+    let by_name = reader_from_name()?;
+    let name = resolve_oath_reader(access.reader.as_deref().or(by_name.as_deref()))?;
     eprintln!("\u{2192} OATH on {}", name);
     let mut session = keyroost_transport::OathSession::open(&name)?;
     session.set_debug(debug);
@@ -2480,6 +2847,18 @@ fn run_oath(cmd: &OathCmd, debug: bool) -> Result<(), Box<dyn std::error::Error>
         OathCmd::List { access } => {
             let mut session = open_oath(access, debug)?;
             let creds = session.list()?;
+            if json_output() {
+                let out: Vec<json_out::OathCredentialJson> = creds
+                    .iter()
+                    .map(|c| json_out::OathCredentialJson {
+                        name: c.name.clone(),
+                        oath_type: oath_type_str(c.oath_type),
+                        algorithm: oath_algo_str(c.algorithm),
+                    })
+                    .collect();
+                emit_json(&out)?;
+                return Ok(());
+            }
             if creds.is_empty() {
                 println!("(no OATH credentials)");
             } else {
@@ -2516,6 +2895,13 @@ fn run_oath(cmd: &OathCmd, debug: bool) -> Result<(), Box<dyn std::error::Error>
                     .as_secs();
                 session.calculate_totp(name, now, *period)?
             };
+            if json_output() {
+                emit_json(&json_out::OathCodeJson {
+                    name: name.clone(),
+                    code: code.code.clone(),
+                })?;
+                return Ok(());
+            }
             println!("{}", code.code);
         }
         OathCmd::Add {
@@ -2629,6 +3015,21 @@ fn run_otp(
             let mut session = open_otp(transport, debug)?;
             let now = unix_now() as u64;
             let entries = session.enumerate(now)?;
+            if json_output() {
+                let out: Vec<json_out::OtpEntryJson> = entries
+                    .iter()
+                    .map(|e| json_out::OtpEntryJson {
+                        app: e.app_name.clone(),
+                        account: e.account_name.clone(),
+                        otp_type: keyroost_transport::otp_type_str(e.otp_type),
+                        algorithm: otp_algo_str_t2(e.algorithm),
+                        code: e.code.clone(),
+                        touch_required: e.button_required,
+                    })
+                    .collect();
+                emit_json(&out)?;
+                return Ok(());
+            }
             if entries.is_empty() {
                 println!("(no OTP entries)");
             } else {
@@ -2654,7 +3055,17 @@ fn run_otp(
             let now = unix_now() as u64;
             let entry = session.read_entry(now, app, account)?;
             match entry.code {
-                Some(code) => println!("{code}"),
+                Some(code) => {
+                    if json_output() {
+                        emit_json(&json_out::OtpGetJson {
+                            app: app.clone(),
+                            account: account.clone(),
+                            code,
+                        })?;
+                        return Ok(());
+                    }
+                    println!("{code}");
+                }
                 None => return Err("device did not return a code for that entry".into()),
             }
         }
@@ -2717,6 +3128,10 @@ fn run_otp(
             let mut session = open_otp(transport, debug)?;
             let sn = session.read_serial()?;
             let hex: String = sn.iter().map(|b| format!("{b:02x}")).collect();
+            if json_output() {
+                emit_json(&json_out::OtpSerialJson { serial: hex })?;
+                return Ok(());
+            }
             println!("{hex}");
         }
         OtpCmd::ButtonHotp {
@@ -2791,7 +3206,9 @@ fn run_otp(
             );
             println!(
                 "  HOTP-on-touch slot:     {}",
-                if info.button_hotp_configured() {
+                if !info.has_config_byte() {
+                    "unknown (device returned a short config block)"
+                } else if info.button_hotp_configured() {
                     "configured"
                 } else {
                     "empty"
@@ -2903,6 +3320,33 @@ fn run_openpgp(cmd: &OpenpgpCmd, debug: bool) -> Result<(), Box<dyn std::error::
         OpenpgpCmd::Status { reader } => {
             let mut session = open_openpgp(reader.as_deref(), debug)?;
             let status = session.status()?;
+
+            if json_output() {
+                // An all-zero fingerprint means "no key in that slot" — mirror the
+                // human "(none)" by emitting null rather than 40 zeros.
+                let fpr = |f: &[u8; 20]| -> Option<String> {
+                    if f.iter().all(|&b| b == 0) {
+                        None
+                    } else {
+                        Some(hex_encode(f))
+                    }
+                };
+                emit_json(&json_out::OpenpgpStatusJson {
+                    aid: hex_encode(&status.aid),
+                    serial: status.serial(),
+                    sig_algo: algo_id_str(status.sig_algo_id).to_string(),
+                    dec_algo: algo_id_str(status.dec_algo_id).to_string(),
+                    aut_algo: algo_id_str(status.aut_algo_id).to_string(),
+                    fingerprint_sig: fpr(&status.fingerprint_sig),
+                    fingerprint_dec: fpr(&status.fingerprint_dec),
+                    fingerprint_aut: fpr(&status.fingerprint_aut),
+                    pin_retries_pw1: status.tries_pw1,
+                    pin_retries_rc: status.tries_rc,
+                    pin_retries_pw3: status.tries_pw3,
+                    signature_count: status.signature_count,
+                })?;
+                return Ok(());
+            }
 
             println!("AID:            {}", hex_encode(&status.aid));
             if let Some(serial) = status.serial() {
@@ -3156,6 +3600,60 @@ fn run_openpgp(cmd: &OpenpgpCmd, debug: bool) -> Result<(), Box<dyn std::error::
                 None => println!("{}", hex_encode(&plain)),
             }
         }
+        OpenpgpCmd::ChangePin {
+            reader,
+            old_pin_env,
+            old_pin_stdin,
+            new_pin_env,
+            new_pin_stdin,
+        } => {
+            // CHANGE REFERENCE DATA carries the old PIN itself — no prior VERIFY.
+            let old = read_secret("old user PIN (PW1)", old_pin_env.as_deref(), *old_pin_stdin)?;
+            let new = read_secret("new user PIN (PW1)", new_pin_env.as_deref(), *new_pin_stdin)?;
+            let mut session = open_openpgp(reader.as_deref(), debug)?;
+            session.change_user_pin(old.as_bytes(), new.as_bytes())?;
+            println!("User PIN (PW1) changed.");
+        }
+        OpenpgpCmd::ChangeAdminPin {
+            reader,
+            old_pin_env,
+            old_pin_stdin,
+            new_pin_env,
+            new_pin_stdin,
+        } => {
+            let old = read_secret(
+                "old admin PIN (PW3)",
+                old_pin_env.as_deref(),
+                *old_pin_stdin,
+            )?;
+            let new = read_secret(
+                "new admin PIN (PW3)",
+                new_pin_env.as_deref(),
+                *new_pin_stdin,
+            )?;
+            let mut session = open_openpgp(reader.as_deref(), debug)?;
+            session.change_admin_pin(old.as_bytes(), new.as_bytes())?;
+            println!("Admin PIN (PW3) changed.");
+        }
+        OpenpgpCmd::UnblockPin {
+            reader,
+            admin_pin_env,
+            admin_pin_stdin,
+            new_pin_env,
+            new_pin_stdin,
+        } => {
+            let admin = read_secret(
+                "admin PIN (PW3)",
+                admin_pin_env.as_deref(),
+                *admin_pin_stdin,
+            )?;
+            let new = read_secret("new user PIN (PW1)", new_pin_env.as_deref(), *new_pin_stdin)?;
+            let mut session = open_openpgp(reader.as_deref(), debug)?;
+            // reset_retry_counter verifies PW3 internally, then RESET RETRY
+            // COUNTER sets the new user PIN — don't double-verify here.
+            session.reset_retry_counter(admin.as_bytes(), new.as_bytes())?;
+            println!("User PIN (PW1) unblocked and reset.");
+        }
     }
     Ok(())
 }
@@ -3165,6 +3663,24 @@ fn run_piv(cmd: &PivCmd, debug: bool) -> Result<(), Box<dyn std::error::Error>> 
         PivCmd::Status { reader } => {
             let mut session = open_piv(reader.as_deref(), debug)?;
             let status = session.status()?;
+
+            if json_output() {
+                emit_json(&json_out::PivStatusJson {
+                    version: status.version.map(|(a, b, c)| format!("{a}.{b}.{c}")),
+                    serial: status.serial,
+                    pin_retries: status.pin_retries,
+                    slots: status
+                        .slots
+                        .iter()
+                        .map(|s| json_out::PivSlotJson {
+                            slot: s.slot.label().to_string(),
+                            cert_present: s.cert_present,
+                            cert_len: s.cert_len,
+                        })
+                        .collect(),
+                })?;
+                return Ok(());
+            }
 
             match status.version {
                 Some((a, b, c)) => println!("Version:     {}.{}.{}", a, b, c),
@@ -3480,7 +3996,8 @@ fn open_openpgp(
     debug: bool,
 ) -> Result<keyroost_transport::OpenPgpSession, Box<dyn std::error::Error>> {
     let readers = keyroost_transport::OpenPgpSession::list_openpgp_readers()?;
-    let name = resolve_reader(readers, reader, "OpenPGP")?;
+    let by_name = reader_from_name()?;
+    let name = resolve_reader(readers, reader.or(by_name.as_deref()), "OpenPGP")?;
     eprintln!("\u{2192} OpenPGP on {}", name);
     let mut session = keyroost_transport::OpenPgpSession::open(&name)?;
     session.set_debug(debug);
@@ -3493,7 +4010,8 @@ fn open_piv(
     debug: bool,
 ) -> Result<keyroost_transport::PivSession, Box<dyn std::error::Error>> {
     let readers = keyroost_transport::PivSession::list_piv_readers()?;
-    let name = resolve_reader(readers, reader, "PIV")?;
+    let by_name = reader_from_name()?;
+    let name = resolve_reader(readers, reader.or(by_name.as_deref()), "PIV")?;
     eprintln!("\u{2192} PIV on {}", name);
     let mut session = keyroost_transport::PivSession::open(&name)?;
     session.set_debug(debug);
@@ -3673,18 +4191,133 @@ fn format_aaguid(aaguid: &[u8; 16]) -> String {
     s
 }
 
+fn run_fido(cmd: &FidoCmd, debug: bool) -> Result<(), Box<dyn std::error::Error>> {
+    // FIDO handlers open their own hidraw transport and don't consult the
+    // shared PC/SC debug flag; accept it for signature parity with the other
+    // run_* group dispatchers.
+    let _ = debug;
+    match cmd {
+        FidoCmd::Info { path } => {
+            run_fido_info(path.as_deref())?;
+            Ok(())
+        }
+        FidoCmd::Reset { yes, path } => {
+            if !*yes {
+                return Err(format!(
+                    "refusing to reset FIDO key without --yes (this wipes credentials){}",
+                    fido_target_hint(path.as_deref())
+                )
+                .into());
+            }
+            run_fido_reset(path.as_deref())?;
+            Ok(())
+        }
+        FidoCmd::PinRetries { path } => {
+            run_fido_pin_retries(path.as_deref())?;
+            Ok(())
+        }
+        FidoCmd::PinSet {
+            new_pin_env,
+            new_pin_stdin,
+            path,
+        } => {
+            let new_pin = read_secret("new PIN", new_pin_env.as_deref(), *new_pin_stdin)?;
+            run_fido_pin_set(path.as_deref(), &new_pin)?;
+            Ok(())
+        }
+        FidoCmd::PinChange {
+            old_pin_env,
+            old_pin_stdin,
+            new_pin_env,
+            new_pin_stdin,
+            path,
+        } => {
+            let old_pin = read_secret("old PIN", old_pin_env.as_deref(), *old_pin_stdin)?;
+            let new_pin = read_secret("new PIN", new_pin_env.as_deref(), *new_pin_stdin)?;
+            run_fido_pin_change(path.as_deref(), &old_pin, &new_pin)?;
+            Ok(())
+        }
+        FidoCmd::CredsMetadata {
+            pin_env,
+            pin_stdin,
+            path,
+        } => {
+            let pin = read_secret("PIN", pin_env.as_deref(), *pin_stdin)?;
+            run_fido_creds_metadata(path.as_deref(), &pin)?;
+            Ok(())
+        }
+        FidoCmd::CredsList {
+            pin_env,
+            pin_stdin,
+            path,
+        } => {
+            let pin = read_secret("PIN", pin_env.as_deref(), *pin_stdin)?;
+            run_fido_creds_list(path.as_deref(), &pin)?;
+            Ok(())
+        }
+        FidoCmd::CredsDelete {
+            cred_id,
+            pin_env,
+            pin_stdin,
+            path,
+        } => {
+            let pin = read_secret("PIN", pin_env.as_deref(), *pin_stdin)?;
+            let cred_id_bytes =
+                hex_decode(cred_id).map_err(|e| format!("--cred-id is not valid hex: {}", e))?;
+            run_fido_creds_delete(path.as_deref(), &pin, &cred_id_bytes)?;
+            Ok(())
+        }
+        FidoCmd::FingerprintList {
+            pin_env,
+            pin_stdin,
+            path,
+        } => {
+            let pin = read_secret("PIN", pin_env.as_deref(), *pin_stdin)?;
+            run_fido_fingerprint_list(path.as_deref(), &pin)?;
+            Ok(())
+        }
+        FidoCmd::FingerprintEnroll {
+            name,
+            pin_env,
+            pin_stdin,
+            path,
+        } => {
+            let pin = read_secret("PIN", pin_env.as_deref(), *pin_stdin)?;
+            run_fido_fingerprint_enroll(path.as_deref(), &pin, name.as_deref())?;
+            Ok(())
+        }
+        FidoCmd::FingerprintRename {
+            template_id,
+            name,
+            pin_env,
+            pin_stdin,
+            path,
+        } => {
+            let pin = read_secret("PIN", pin_env.as_deref(), *pin_stdin)?;
+            let id = hex_decode(template_id)
+                .map_err(|e| format!("--template-id is not valid hex: {}", e))?;
+            run_fido_fingerprint_rename(path.as_deref(), &pin, &id, name)?;
+            Ok(())
+        }
+        FidoCmd::FingerprintDelete {
+            template_id,
+            pin_env,
+            pin_stdin,
+            path,
+        } => {
+            let pin = read_secret("PIN", pin_env.as_deref(), *pin_stdin)?;
+            let id = hex_decode(template_id)
+                .map_err(|e| format!("--template-id is not valid hex: {}", e))?;
+            run_fido_fingerprint_delete(path.as_deref(), &pin, &id)?;
+            Ok(())
+        }
+    }
+}
+
 fn run_fido_info(path: Option<&std::path::Path>) -> Result<(), Box<dyn std::error::Error>> {
     let path = resolve_fido_path(path)?;
     let (mut dev, init) = keyroost_ctap::CtapHidDevice::open(&path)?;
-    println!("Device:    {}", path.display());
-    println!(
-        "Channel:   {:#010x} (CTAPHID protocol v{})",
-        init.channel_id, init.protocol_version
-    );
-    println!(
-        "Firmware:  {}.{}.{}",
-        init.device_major, init.device_minor, init.device_build
-    );
+    let json = json_output();
     let mut caps = Vec::new();
     if init.supports_wink() {
         caps.push("WINK");
@@ -3695,19 +4328,78 @@ fn run_fido_info(path: Option<&std::path::Path>) -> Result<(), Box<dyn std::erro
     if init.supports_u2f() {
         caps.push("U2F");
     }
-    println!(
-        "Caps:      {} (raw 0x{:02X})",
-        caps.join("+"),
-        init.capabilities
-    );
+    if !json {
+        println!("Device:    {}", path.display());
+        println!(
+            "Channel:   {:#010x} (CTAPHID protocol v{})",
+            init.channel_id, init.protocol_version
+        );
+        println!(
+            "Firmware:  {}.{}.{}",
+            init.device_major, init.device_minor, init.device_build
+        );
+        println!(
+            "Caps:      {} (raw 0x{:02X})",
+            caps.join("+"),
+            init.capabilities
+        );
+    }
 
     if !init.supports_cbor() {
+        if json {
+            emit_json(&json_out::FidoInfoJson {
+                device: path.display().to_string(),
+                channel_id: init.channel_id,
+                ctaphid_protocol_version: init.protocol_version,
+                firmware: format!(
+                    "{}.{}.{}",
+                    init.device_major, init.device_minor, init.device_build
+                ),
+                hid_caps: caps,
+                hid_caps_raw: init.capabilities,
+                ctap2: None,
+            })?;
+            return Ok(());
+        }
         println!();
         println!("(device is U2F-only; CTAP2 GetInfo not available)");
         return Ok(());
     }
 
     let info = keyroost_ctap::get_info(&mut dev)?;
+
+    if json {
+        emit_json(&json_out::FidoInfoJson {
+            device: path.display().to_string(),
+            channel_id: init.channel_id,
+            ctaphid_protocol_version: init.protocol_version,
+            firmware: format!(
+                "{}.{}.{}",
+                init.device_major, init.device_minor, init.device_build
+            ),
+            hid_caps: caps,
+            hid_caps_raw: init.capabilities,
+            ctap2: Some(json_out::Ctap2InfoJson {
+                versions: info.versions.clone(),
+                extensions: info.extensions.clone(),
+                aaguid: format_aaguid(&info.aaguid),
+                options: info
+                    .options
+                    .iter()
+                    .map(|(k, v)| json_out::OptionJson {
+                        name: k.clone(),
+                        value: *v,
+                    })
+                    .collect(),
+                max_msg_size: info.max_msg_size,
+                pin_uv_auth_protocols: info.pin_uv_auth_protocols.clone(),
+                transports: info.transports.clone(),
+                firmware_version: info.firmware_version,
+            }),
+        })?;
+        return Ok(());
+    }
+
     println!();
     println!("Versions:  {}", info.versions.join(", "));
     if !info.extensions.is_empty() {
@@ -3755,6 +4447,10 @@ fn run_fido_pin_retries(path: Option<&std::path::Path>) -> Result<(), Box<dyn st
     let path = resolve_fido_path(path)?;
     let (mut dev, _) = keyroost_ctap::CtapHidDevice::open(&path)?;
     let n = keyroost_ctap::client_pin::get_pin_retries(&mut dev)?;
+    if json_output() {
+        emit_json(&json_out::FidoPinRetriesJson { pin_retries: n })?;
+        return Ok(());
+    }
     println!("{} PIN attempt(s) remaining", n);
     Ok(())
 }
@@ -3788,6 +4484,13 @@ fn run_fido_creds_metadata(
 ) -> Result<(), Box<dyn std::error::Error>> {
     with_credential_manager(path, pin, |mgr| {
         let meta = mgr.metadata()?;
+        if json_output() {
+            emit_json(&json_out::FidoCredsMetadataJson {
+                existing_resident_credentials: meta.existing_count,
+                max_possible_remaining: meta.max_remaining,
+            })?;
+            return Ok(());
+        }
         println!(
             "{} resident credential(s) stored, room for {} more",
             meta.existing_count, meta.max_remaining
@@ -3802,6 +4505,30 @@ fn run_fido_creds_list(
 ) -> Result<(), Box<dyn std::error::Error>> {
     with_credential_manager(path, pin, |mgr| {
         let rps = mgr.list_relying_parties()?;
+        if json_output() {
+            let mut relying_parties = Vec::with_capacity(rps.len());
+            for rp in &rps {
+                let creds = mgr.list_credentials(&rp.rp_id_hash)?;
+                let credentials = creds
+                    .iter()
+                    .map(|c| json_out::FidoCredentialJson {
+                        credential_id: hex_encode(&c.credential_id),
+                        user_id: String::from_utf8_lossy(&c.user.id).into_owned(),
+                        user_name: c.user.name.clone(),
+                        user_display_name: c.user.display_name.clone(),
+                        algorithm: c.algorithm,
+                        algorithm_name: c.algorithm.map(cose_algorithm_name),
+                    })
+                    .collect();
+                relying_parties.push(json_out::FidoRelyingPartyJson {
+                    rp_id: rp.id.clone(),
+                    rp_name: rp.name.clone().filter(|n| !n.is_empty()),
+                    credentials,
+                });
+            }
+            emit_json(&json_out::FidoCredsListJson { relying_parties })?;
+            return Ok(());
+        }
         if rps.is_empty() {
             println!("(no resident credentials)");
             return Ok(());
@@ -3859,6 +4586,92 @@ fn run_fido_creds_delete(
     })
 }
 
+fn run_fido_fingerprint_list(
+    path: Option<&std::path::Path>,
+    pin: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    with_bio_enrollment(path, pin, |bio| {
+        let list = bio.enumerate()?;
+        if list.is_empty() {
+            println!("(no fingerprints enrolled)");
+            return Ok(());
+        }
+        println!("Enrolled fingerprints:");
+        for e in &list {
+            let name = e.friendly_name.as_deref().unwrap_or("(unnamed)");
+            // The hex template id is what --template-id takes for rename/delete.
+            println!("  id {}   {}", hex_encode(&e.template_id), name);
+        }
+        println!("(use the id with --template-id to rename or delete)");
+        Ok(())
+    })
+}
+
+fn run_fido_fingerprint_enroll(
+    path: Option<&std::path::Path>,
+    pin: &str,
+    name: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use keyroost_ctap::bio_enroll::sample_status_message;
+    with_bio_enrollment(path, pin, |bio| {
+        if let Ok(info) = bio.sensor_info() {
+            if info.max_capture_samples > 0 {
+                println!(
+                    "Enrolling a fingerprint ({} good samples needed).",
+                    info.max_capture_samples
+                );
+            }
+        }
+        println!("Touch the sensor now\u{2026}");
+        let (template_id, mut status) = bio.enroll_begin(None)?;
+        println!("  {}", sample_status_message(status.last_sample_status));
+        // Capture until the device says no samples remain.
+        while status.remaining_samples > 0 {
+            println!(
+                "  {} more sample(s) needed \u{2014} touch the sensor again\u{2026}",
+                status.remaining_samples
+            );
+            status = bio.enroll_capture_next(&template_id, None)?;
+            println!("  {}", sample_status_message(status.last_sample_status));
+        }
+        // Optionally name it once enrolled.
+        if let Some(n) = name {
+            bio.set_friendly_name(&template_id, n)?;
+        }
+        println!(
+            "Fingerprint enrolled: {}{}",
+            hex_encode(&template_id),
+            name.map(|n| format!("  ({})", n)).unwrap_or_default()
+        );
+        Ok(())
+    })
+}
+
+fn run_fido_fingerprint_rename(
+    path: Option<&std::path::Path>,
+    pin: &str,
+    template_id: &[u8],
+    name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    with_bio_enrollment(path, pin, |bio| {
+        bio.set_friendly_name(template_id, name)?;
+        println!("Renamed {} to \"{}\".", hex_short(template_id), name);
+        Ok(())
+    })
+}
+
+fn run_fido_fingerprint_delete(
+    path: Option<&std::path::Path>,
+    pin: &str,
+    template_id: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    with_bio_enrollment(path, pin, |bio| {
+        bio.remove_enrollment(template_id)?;
+        println!("Fingerprint {} deleted.", hex_short(template_id));
+        Ok(())
+    })
+}
+
 /// Open a hidraw device, fetch GetInfo, exchange PIN/UV auth, and hand a
 /// fully-armed `CredentialManager` to the caller. Avoids a self-referential
 /// return type by keeping the device on the stack and using a closure.
@@ -3886,6 +4699,49 @@ where
     )?;
     let mut mgr = keyroost_ctap::cred_mgmt::CredentialManager::new(&mut dev, token, &info)?;
     f(&mut mgr)
+}
+
+/// Open a FIDO device and hand the caller an armed `BioEnrollment` session,
+/// mirroring `with_credential_manager`. Selects the standard (0x09) or preview
+/// (0x40) command byte based on what the authenticator advertises.
+fn with_bio_enrollment<F>(
+    path: Option<&std::path::Path>,
+    pin: &str,
+    f: F,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    F: for<'a> FnOnce(
+        &mut keyroost_ctap::bio_enroll::BioEnrollment<'a>,
+    ) -> Result<(), Box<dyn std::error::Error>>,
+{
+    let path = resolve_fido_path(path)?;
+    let (mut dev, init) = keyroost_ctap::CtapHidDevice::open(&path)?;
+    if !init.supports_cbor() {
+        return Err("device is U2F-only; CTAP2 bio enrollment not supported".into());
+    }
+    let info = keyroost_ctap::get_info(&mut dev)?;
+    // Pick the command byte from what the authenticator advertises. The option
+    // value is Some(true) (enrolled), Some(false) (supported, none enrolled), or
+    // None (not present). For *either* state the feature is supported, so test
+    // `.is_some()` per option — but choose the command byte that matches which
+    // option name the key actually lists, since a key supports exactly one.
+    let has_standard = info.option("bioEnroll").is_some();
+    let has_preview = info.option("userVerificationMgmtPreview").is_some();
+    let cmd_code = if has_standard {
+        keyroost_ctap::bio_enroll::CTAP2_BIO_ENROLLMENT
+    } else if has_preview {
+        keyroost_ctap::bio_enroll::CTAP2_BIO_ENROLLMENT_PREVIEW
+    } else {
+        return Err("this authenticator does not advertise fingerprint enrollment".into());
+    };
+    let token = keyroost_ctap::client_pin::get_pin_uv_auth_token(
+        &mut dev,
+        pin,
+        &info,
+        keyroost_ctap::client_pin::permissions::BIO_ENROLLMENT,
+    )?;
+    let mut bio = keyroost_ctap::bio_enroll::BioEnrollment::new(&mut dev, token, cmd_code);
+    f(&mut bio)
 }
 
 /// How a seed/key option was supplied: literal argv value, env var name, or
@@ -4188,5 +5044,384 @@ fn main() -> ExitCode {
             eprintln!("error: worker thread panicked");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+    use clap::Parser;
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(args)
+    }
+
+    #[test]
+    fn clap_command_is_valid() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn manpage_set_renders_for_every_subcommand() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let mut buf = Vec::new();
+        clap_mangen::Man::new(cmd.clone()).render(&mut buf).unwrap();
+        assert!(!buf.is_empty());
+        let mut count = 0;
+        for sub in cmd.get_subcommands() {
+            let mut b = Vec::new();
+            clap_mangen::Man::new(sub.clone()).render(&mut b).unwrap();
+            assert!(!b.is_empty(), "empty man page for {}", sub.get_name());
+            count += 1;
+        }
+        assert!(count >= 7, "expected >=7 subcommand groups, got {count}");
+    }
+
+    #[test]
+    fn fido_is_nested() {
+        assert!(parse(&["keyroostctl", "fido", "info"]).is_ok());
+        assert!(parse(&["keyroostctl", "fido", "pin-set", "--new-pin-stdin"]).is_ok());
+        assert!(parse(&["keyroostctl", "fido", "creds-list"]).is_ok());
+        assert!(parse(&["keyroostctl", "fido-info"]).is_err());
+        assert!(parse(&["keyroostctl", "fido-creds-list"]).is_err());
+    }
+
+    #[test]
+    fn openpgp_pin_commands_parse() {
+        assert!(Cli::try_parse_from([
+            "keyroostctl",
+            "openpgp",
+            "change-pin",
+            "--old-pin-stdin",
+            "--new-pin-stdin"
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "keyroostctl",
+            "openpgp",
+            "change-admin-pin",
+            "--old-pin-stdin",
+            "--new-pin-stdin"
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "keyroostctl",
+            "openpgp",
+            "unblock-pin",
+            "--admin-pin-stdin",
+            "--new-pin-stdin"
+        ])
+        .is_ok());
+    }
+
+    #[test]
+    fn molto_is_nested() {
+        assert!(parse(&["keyroostctl", "molto", "info"]).is_ok());
+        assert!(parse(&[
+            "keyroostctl",
+            "molto",
+            "seed",
+            "--profile",
+            "0",
+            "--hex-stdin"
+        ])
+        .is_ok());
+        assert!(parse(&["keyroostctl", "molto", "reset", "--yes"]).is_ok());
+        assert!(parse(&["keyroostctl", "molto", "probe", "--yes"]).is_ok());
+        assert!(parse(&["keyroostctl", "set-seed", "--profile", "0", "--hex-stdin"]).is_err());
+        assert!(parse(&["keyroostctl", "factory-reset", "--yes"]).is_err());
+        assert!(parse(&["keyroostctl", "molto", "info", "--key-env", "K"]).is_ok());
+    }
+
+    #[test]
+    fn name_is_accepted_on_every_group() {
+        for g in [
+            &["keyroostctl", "--name", "k", "piv", "status"][..],
+            &["keyroostctl", "--name", "k", "oath", "list"][..],
+            &["keyroostctl", "--name", "k", "openpgp", "status"][..],
+            &["keyroostctl", "--name", "k", "otp", "list"][..],
+            &["keyroostctl", "--name", "k", "molto", "info"][..],
+            &["keyroostctl", "--name", "k", "fido", "info"][..],
+        ] {
+            assert!(parse(g).is_ok(), "should parse: {:?}", g);
+        }
+    }
+
+    #[test]
+    fn json_flag_parses_globally() {
+        assert!(parse(&["keyroostctl", "--json", "piv", "status"]).is_ok());
+        assert!(parse(&["keyroostctl", "--json", "fido", "info"]).is_ok());
+        assert!(parse(&["keyroostctl", "--json", "molto", "info"]).is_ok());
+        // Position-insensitive: --json after the subcommand also works (global).
+        assert!(parse(&["keyroostctl", "piv", "status", "--json"]).is_ok());
+    }
+
+    /// Serialize `value`, assert it parses back to a JSON object, and assert
+    /// every key in `keys` is present at the top level.
+    fn assert_json_has_keys<T: serde::Serialize>(value: &T, keys: &[&str]) {
+        let s = serde_json::to_string(value).expect("serialize");
+        let v: serde_json::Value = serde_json::from_str(&s).expect("parse back");
+        let obj = v.as_object().expect("top-level object");
+        for k in keys {
+            assert!(obj.contains_key(*k), "missing key {k:?} in {s}");
+        }
+    }
+
+    #[test]
+    fn device_json_serializes() {
+        let d = json_out::DeviceJson {
+            vendor: "Yubico".into(),
+            model: "YubiKey 5".into(),
+            name: Some("work".into()),
+            serial: "12345678".into(),
+            transport: "USB · PC/SC + FIDO HID".into(),
+            kind: "key",
+            caps: vec!["FIDO2", "OATH", "PIV"],
+        };
+        assert_json_has_keys(
+            &d,
+            &["vendor", "model", "serial", "transport", "kind", "caps"],
+        );
+        // The whole overview is a JSON array of these.
+        let arr = serde_json::to_string(&vec![d]).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&arr).unwrap();
+        assert!(parsed.is_array());
+    }
+
+    #[test]
+    fn molto_info_json_serializes() {
+        let m = json_out::MoltoInfoJson {
+            serial: "ABC123".into(),
+            utc: 1_700_000_000,
+            drift_seconds: -3,
+        };
+        assert_json_has_keys(&m, &["serial", "utc", "drift_seconds"]);
+    }
+
+    #[test]
+    fn fido_info_json_serializes() {
+        // CTAP2 device: ctap2 present.
+        let f = json_out::FidoInfoJson {
+            device: "/dev/hidraw0".into(),
+            channel_id: 0xdead_beef,
+            ctaphid_protocol_version: 2,
+            firmware: "5.4.3".into(),
+            hid_caps: vec!["CBOR", "U2F"],
+            hid_caps_raw: 0x0d,
+            ctap2: Some(json_out::Ctap2InfoJson {
+                versions: vec!["FIDO_2_0".into()],
+                extensions: vec!["hmac-secret".into()],
+                aaguid: "00000000-0000-0000-0000-000000000000".into(),
+                options: vec![json_out::OptionJson {
+                    name: "rk".into(),
+                    value: true,
+                }],
+                max_msg_size: Some(1200),
+                pin_uv_auth_protocols: vec![1, 2],
+                transports: vec!["usb".into()],
+                firmware_version: Some(328706),
+            }),
+        };
+        assert_json_has_keys(
+            &f,
+            &["device", "channel_id", "firmware", "hid_caps", "ctap2"],
+        );
+        // U2F-only device: ctap2 omitted entirely (skip_serializing_if).
+        let u = json_out::FidoInfoJson {
+            device: "/dev/hidraw1".into(),
+            channel_id: 1,
+            ctaphid_protocol_version: 2,
+            firmware: "1.0.0".into(),
+            hid_caps: vec!["U2F"],
+            hid_caps_raw: 0x08,
+            ctap2: None,
+        };
+        let s = serde_json::to_string(&u).unwrap();
+        assert!(!s.contains("ctap2"), "ctap2 should be omitted: {s}");
+    }
+
+    #[test]
+    fn fido_pin_retries_json_serializes() {
+        let p = json_out::FidoPinRetriesJson { pin_retries: 8 };
+        assert_json_has_keys(&p, &["pin_retries"]);
+    }
+
+    #[test]
+    fn piv_status_json_serializes() {
+        let p = json_out::PivStatusJson {
+            version: Some("5.4.3".into()),
+            serial: Some(12345678),
+            pin_retries: Some(3),
+            slots: vec![json_out::PivSlotJson {
+                slot: "9a (Authentication)".into(),
+                cert_present: true,
+                cert_len: 800,
+            }],
+        };
+        assert_json_has_keys(&p, &["version", "serial", "pin_retries", "slots"]);
+    }
+
+    #[test]
+    fn openpgp_status_json_serializes() {
+        let o = json_out::OpenpgpStatusJson {
+            aid: "d2760001240103040006...".into(),
+            serial: Some(12345678),
+            sig_algo: "RSA".into(),
+            dec_algo: "RSA".into(),
+            aut_algo: "RSA".into(),
+            fingerprint_sig: Some("aabb...".into()),
+            fingerprint_dec: None,
+            fingerprint_aut: None,
+            pin_retries_pw1: 3,
+            pin_retries_rc: 0,
+            pin_retries_pw3: 3,
+            signature_count: Some(7),
+        };
+        assert_json_has_keys(
+            &o,
+            &[
+                "aid",
+                "sig_algo",
+                "pin_retries_pw1",
+                "pin_retries_pw3",
+                "signature_count",
+            ],
+        );
+    }
+
+    #[test]
+    fn otp_serial_json_serializes() {
+        let s = json_out::OtpSerialJson {
+            serial: "0123456789ab".into(),
+        };
+        assert_json_has_keys(&s, &["serial"]);
+    }
+
+    #[test]
+    fn oath_credential_json_serializes() {
+        // Synthetic credential — no real account data.
+        let c = json_out::OathCredentialJson {
+            name: "example".into(),
+            oath_type: "TOTP",
+            algorithm: "SHA1",
+        };
+        assert_json_has_keys(&c, &["name", "oath_type", "algorithm"]);
+        // `oath list` emits a JSON array of these.
+        let arr = serde_json::to_string(&vec![c]).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&arr).unwrap();
+        assert!(parsed.is_array());
+    }
+
+    #[test]
+    fn oath_code_json_serializes() {
+        let c = json_out::OathCodeJson {
+            name: "example".into(),
+            code: "123456".into(),
+        };
+        assert_json_has_keys(&c, &["name", "code"]);
+    }
+
+    #[test]
+    fn otp_entry_json_serializes() {
+        // Synthetic entry with a code present.
+        let e = json_out::OtpEntryJson {
+            app: "Example".into(),
+            account: "alice".into(),
+            otp_type: "TOTP",
+            algorithm: "SHA1",
+            code: Some("123456".into()),
+            touch_required: false,
+        };
+        assert_json_has_keys(
+            &e,
+            &[
+                "app",
+                "account",
+                "otp_type",
+                "algorithm",
+                "code",
+                "touch_required",
+            ],
+        );
+        // Withheld (touch-required) entry: code serializes as JSON null.
+        let withheld = json_out::OtpEntryJson {
+            app: "Example".into(),
+            account: "bob".into(),
+            otp_type: "HOTP",
+            algorithm: "SHA256",
+            code: None,
+            touch_required: true,
+        };
+        let s = serde_json::to_string(&withheld).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert!(v.get("code").unwrap().is_null());
+        assert_eq!(
+            v.get("touch_required").unwrap(),
+            &serde_json::Value::Bool(true)
+        );
+        // `otp list` emits a JSON array.
+        let arr = serde_json::to_string(&vec![e]).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&arr).unwrap();
+        assert!(parsed.is_array());
+    }
+
+    #[test]
+    fn otp_get_json_serializes() {
+        let g = json_out::OtpGetJson {
+            app: "Example".into(),
+            account: "alice".into(),
+            code: "123456".into(),
+        };
+        assert_json_has_keys(&g, &["app", "account", "code"]);
+    }
+
+    #[test]
+    fn fido_creds_metadata_json_serializes() {
+        let m = json_out::FidoCredsMetadataJson {
+            existing_resident_credentials: 3,
+            max_possible_remaining: 22,
+        };
+        assert_json_has_keys(
+            &m,
+            &["existing_resident_credentials", "max_possible_remaining"],
+        );
+    }
+
+    #[test]
+    fn fido_creds_list_json_serializes() {
+        // Synthetic relying party + credential — no real RP/user data.
+        let cred = json_out::FidoCredentialJson {
+            credential_id: "aabbccdd".into(),
+            user_id: "user-handle".into(),
+            user_name: Some("alice".into()),
+            user_display_name: Some("Alice Example".into()),
+            algorithm: Some(-7),
+            algorithm_name: Some("ES256"),
+        };
+        assert_json_has_keys(
+            &cred,
+            &["credential_id", "user_id", "user_name", "algorithm"],
+        );
+        let list = json_out::FidoCredsListJson {
+            relying_parties: vec![json_out::FidoRelyingPartyJson {
+                rp_id: "example.com".into(),
+                rp_name: Some("Example".into()),
+                credentials: vec![cred],
+            }],
+        };
+        assert_json_has_keys(&list, &["relying_parties"]);
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&list).unwrap()).unwrap();
+        assert!(v.get("relying_parties").unwrap().is_array());
+        // Empty rp_name is omitted (skip_serializing_if).
+        let no_name = json_out::FidoRelyingPartyJson {
+            rp_id: "example.org".into(),
+            rp_name: None,
+            credentials: vec![],
+        };
+        let s = serde_json::to_string(&no_name).unwrap();
+        assert!(!s.contains("rp_name"), "rp_name should be omitted: {s}");
     }
 }

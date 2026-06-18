@@ -12,6 +12,7 @@
 //!
 //! Currently Linux-only; cross-platform HID backends are a later phase.
 
+pub mod bio_enroll;
 pub mod cbor;
 pub mod client_pin;
 pub mod cmd;
@@ -19,5 +20,6 @@ pub mod cred_mgmt;
 pub mod hid;
 pub mod pin;
 
+pub use bio_enroll::{BioEnrollment, CaptureStatus, Enrollment, SensorInfo};
 pub use cmd::{get_info, reset, AuthenticatorInfo, CtapError};
 pub use hid::{CtapHidDevice, InitResponse};

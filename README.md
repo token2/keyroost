@@ -2,17 +2,19 @@
 
 An independent, open-source Rust toolchain for managing hardware security keys —
 across vendors — over PC/SC and USB HID. It speaks FIDO2/CTAP2, OATH (TOTP/HOTP),
-and the OpenPGP card protocol, and also programs the Token2 Molto2 / Molto2v2 TOTP
-token it started life targeting. Ships a Rust library, a CLI (`keyroostctl`), and a
+and the OpenPGP and PIV card protocols, manages on-device OTP on Token2 FIDO keys,
+and also programs the Token2 Molto2 / Molto2v2 TOTP token it started life
+targeting. Ships a Rust library, a CLI (`keyroostctl`), and a
 dark-themed desktop GUI (`keyroost`) — implemented from public standards, with no
 vendor SDKs, no Python, and no Qt.
 
 > **Built with AI.** I saw a real need for this but never learned to code, so
-> keyroost — code, docs, and all — was written end-to-end with AI. Since that AI
-> learned from the vast commons of free and open-source software people have
-> generously shared, releasing keyroost as FOSS isn't really a choice; it's
-> giving back to what made it possible. Absent outside contributors it will stay
-> AI-authored — issues and review are warmly welcome.
+> the parts I author — code, docs, and all — are written end-to-end with AI.
+> (Contributions from others, such as Token2's, are their own human-designed and
+> -developed work — see the Contributors section.) Since the AI I use learned
+> from the vast commons of free and open-source software people have generously
+> shared, releasing keyroost as FOSS isn't really a choice; it's giving back to
+> what made it possible. Issues, review, and contributions are warmly welcome.
 
 **New to hardware keys?** Read the companion guide —
 [*"So you bought a hardware security key… now what?"*](https://framefilter.github.io/keyroost/) —
@@ -28,11 +30,17 @@ a short, vendor-neutral tour of what FIDO2, OATH, OpenPGP, and PIV actually do.
 - **OpenPGP card (v3.4)** — read status; generate or import RSA-2048 keys (host
   keygen or a PKCS#1/PKCS#8 PEM/DER file); sign (SHA-256 or SHA-1); decrypt; set
   cardholder name / URL; register a key for GnuPG; factory-reset the applet.
-- **PIV (SP 800-73-4)** — read-only status so far: applet/firmware version,
-  serial, PIN retries, and which key slots (9A/9C/9D/9E) hold a certificate.
+- **PIV (SP 800-73-4)** — full management: status (applet/firmware version,
+  serial, PIN retries, which slots 9A/9C/9D/9E hold a certificate), on-card key
+  generation, certificate import / export, self-signed certs or a CSR for a CA,
+  and PIN / PUK / management-key changes and applet reset.
 - **Token2 Molto2 / Molto2v2** — program a slot from an `otpauth://` URI;
   bulk-import from Aegis (plaintext or encrypted), 2FAS, or a list of `otpauth://`
   URIs; sync the host clock; rotate the customer key; factory reset.
+- **Token2 on-device OTP (PIN+ Series FIDO keys)** — store TOTP/HOTP credentials
+  directly on a Token2 FIDO security key and read their codes over USB-HID, NFC,
+  or CCID; configure the single HOTP-on-touch keystroke slot; read the serial;
+  and enable / disable the key's USB interfaces (FIDO / keyboard-HID / CCID).
 - **Friendly device names** — an opt-in `keys.json` registry to target a specific
   physical key by name when several are connected, instead of by a reshuffling
   `/dev/hidrawN` path. Destructive operations always resolve to an explicit
@@ -43,8 +51,8 @@ a short, vendor-neutral tour of what FIDO2, OATH, OpenPGP, and PIV actually do.
 | Device | Capabilities | Notes |
 |---|---|---|
 | **Token2 Molto2 / Molto2v2** | TOTP slot programming | The original target. |
-| **Token2 PIN+ Series** | FIDO2, OTP, OpenPGP, PIV | Also supports on-device OTP, including TOTP/HOTP and HID/keyboard-based HOTP. |
-| **YubiKey** (5 series) | FIDO2, OATH, OpenPGP | Built and verified against a YubiKey 5.7. |
+| **Token2 PIN+ Series** | FIDO2 (+ bio), OTP, OpenPGP, PIV | FIDO2 with fingerprint/bio enrollment and FIDO Metadata Service (MDS) display, plus on-device OTP (TOTP/HOTP, incl. HID/keyboard HOTP) over USB-HID / NFC / CCID — all validated on PIN+ hardware. Contributed by [@token2](https://github.com/token2). The OATH / OpenPGP / PIV smart-card applets are handled by the standard byte layers but **not yet exercised on PIN+ hardware by this project** (experimental). |
+| **YubiKey** (5 series) | FIDO2, OATH, OpenPGP, PIV | Built and verified against a YubiKey 5.7. |
 | **SoloKeys Solo 2** | FIDO2, OATH | Trussed firmware; no OpenPGP applet. |
 | **Nitrokey 3** | FIDO2, OATH | Shares the Solo 2 / Trussed stack. |
 
@@ -80,18 +88,29 @@ Beyond the maintainers, keyroost is grateful for community contributions:
 - **[@token2](https://github.com/token2)** — contributed on-device TOTP/HOTP
   management for Token2 FIDO keys (PIN+ / FIDO2+), and published the protocol
   reference it was built from
-  ([#24](https://github.com/framefilter/keyroost/pull/24)).
+  ([#24](https://github.com/framefilter/keyroost/pull/24)). Followed up with
+  fingerprint/bio enrollment, FIDO Metadata Service (MDS) display, and a
+  rounding-out of the on-device OTP support — all validated on real PIN+
+  hardware ([#29](https://github.com/framefilter/keyroost/pull/29),
+  [#30](https://github.com/framefilter/keyroost/pull/30)).
 
 (This credits their contribution to the codebase; it does not change keyroost's
 independent status described above.)
 
 ## Design principles
 
-- **Vendor over depend.** SM4, SHA-1/256, base32, hex, CBOR, CTAP-HID framing,
-  the OATH/OpenPGP byte layers, and `otpauth://` parsing are all in-tree. The only
-  external deps are `pcsc`, `clap`, `eframe`/`egui`, `serde`, and — for RSA
-  keygen/parsing alone — `rsa`/`rand`.
-- **Pure-Rust crypto**, checked against standard test vectors.
+- **Few dependencies, by design.** The protocol and codec layers are hand-written
+  and pull in nothing: the Molto2 wire protocol (SM4, SHA-1, the MAC), base32, hex,
+  CBOR, CTAP-HID framing, and the OATH / OpenPGP / PIV byte layers are all in-tree.
+  External crates are added only when *not* doing so would be irresponsible or
+  impractical — audited cryptography we won't hand-roll under `forbid(unsafe_code)`
+  (RustCrypto: `sha2` / `hmac` / `aes` / `p256` / `rsa` / …) and platform glue
+  (`pcsc`, `hidapi` on macOS/Windows, `clap`, `eframe`/`egui`). The per-crate list
+  is in the table below, and the standing goal is to shrink it over time, not grow
+  it.
+- **Pure-Rust crypto** — no OpenSSL or other C crypto; the in-tree primitives are
+  checked against standard test vectors, and standard algorithms come from the
+  audited RustCrypto crates.
 - **Secrets stay yours.** PINs and passwords come from stdin or env vars, never
   argv; the tool never prints or persists them.
 - **Single static binary per OS** — no scripts, no Python, no Qt.
@@ -134,7 +153,7 @@ packages. macOS/Windows are tier-2 (best-effort, not yet hardware-verified).
 
 > **Windows and FIDO:** Windows reserves raw FIDO HID access for elevated
 > processes (the OS routes normal apps through its own WebAuthn API instead).
-> Expect the `fido-*` commands and the Security Keys pane to require an
+> Expect the `fido` commands and the Security Keys pane to require an
 > elevated ("Run as administrator") session on Windows; the Molto2, OATH,
 > OpenPGP, and PIV features go over PC/SC and work unelevated. Elevate for
 > the FIDO command you need, then drop back — don't run the whole tool
@@ -156,7 +175,7 @@ packages. macOS/Windows are tier-2 (best-effort, not yet hardware-verified).
 ### FIDO HID access (Linux udev rules)
 
 The OATH, OpenPGP, and PIV applets are reached over PC/SC and need no special
-permissions. Talking to a key's **FIDO interface** (`fido-*` commands, and the
+permissions. Talking to a key's **FIDO interface** (the `fido` commands, and the
 Security Keys GUI pane), though, opens a `/dev/hidraw*` node, which is
 root-only by default. Install the bundled udev rules to grant the logged-in user
 access:
@@ -179,9 +198,9 @@ installing them.
 keyroostctl list
 
 # --- FIDO2 (YubiKey / Solo 2 / Nitrokey 3) ---
-keyroostctl fido-info
-keyroostctl fido-pin-retries
-keyroostctl fido-creds-list --pin-stdin        # PIN read from stdin, never argv
+keyroostctl fido info
+keyroostctl fido pin-retries
+keyroostctl fido creds-list --pin-stdin        # PIN read from stdin, never argv
 
 # --- OATH over PC/SC ---
 keyroostctl oath list --reader yubikey
@@ -195,34 +214,73 @@ keyroostctl openpgp sign --in msg.txt --pin-stdin --reader yubikey
 keyroostctl piv status --reader yubikey
 
 # --- Token2 Molto2 (TOTP programming) ---
-keyroostctl info
-keyroostctl import --profile 0 'otpauth://totp/GitHub:me@x.com?secret=JBSWY3DPEHPK3PXP'
-keyroostctl import-file ~/Downloads/aegis.json --start 0 --dry-run   # validate first
+keyroostctl molto info
+keyroostctl molto import --profile 0 'otpauth://totp/GitHub:me@x.com?secret=JBSWY3DPEHPK3PXP'
+keyroostctl molto import-file ~/Downloads/aegis.json --start 0 --dry-run   # validate first
+
+# --- Token2 on-device OTP (PIN+ Series FIDO keys) ---
+keyroostctl otp list
+keyroostctl otp add GitHub me@x.com --seed-stdin    # base32 seed from stdin, never argv
+keyroostctl otp get GitHub me@x.com
 
 # name a key to target it when several are plugged in (opt-in)
 keyroostctl key-name list
 
-# launch the GUI (tabs: Molto2 profiles, Security Keys, OATH, OpenPGP)
+# launch the GUI (per-device tabs: Overview, Security Keys, OATH, OpenPGP, PIV,
+# On-device OTP, plus the distinct Molto2 view)
 keyroost
 ```
+
+## Migrating to the 0.6.0 command names
+
+The Molto2 and FIDO commands are now nested under `molto` and `fido` groups.
+The old flat names have been replaced — update any scripts as follows:
+
+| Old (≤ 0.5.x)                       | New (0.6.0)                          |
+|-------------------------------------|--------------------------------------|
+| `keyroostctl info`                  | `keyroostctl molto info`             |
+| `keyroostctl set-seed …`            | `keyroostctl molto seed …`           |
+| `keyroostctl set-title …`           | `keyroostctl molto title …`          |
+| `keyroostctl configure …`           | `keyroostctl molto config …`         |
+| `keyroostctl sync-time …`           | `keyroostctl molto sync-time …`      |
+| `keyroostctl set-customer-key …`    | `keyroostctl molto customer-key …`   |
+| `keyroostctl import …`              | `keyroostctl molto import …`         |
+| `keyroostctl import-file …`         | `keyroostctl molto import-file …`    |
+| `keyroostctl factory-reset …`       | `keyroostctl molto reset …`          |
+| `keyroostctl fido-info`             | `keyroostctl fido info`              |
+| `keyroostctl fido-reset …`          | `keyroostctl fido reset …`           |
+| `keyroostctl fido-pin-set …`        | `keyroostctl fido pin-set …`         |
+| `keyroostctl fido-pin-change …`     | `keyroostctl fido pin-change …`      |
+| `keyroostctl fido-pin-retries`      | `keyroostctl fido pin-retries`       |
+| `keyroostctl fido-creds-list …`     | `keyroostctl fido creds-list …`      |
+| `keyroostctl fido-creds-metadata …` | `keyroostctl fido creds-metadata …`  |
+| `keyroostctl fido-creds-delete …`   | `keyroostctl fido creds-delete …`    |
+| `keyroostctl manpage > x.1`         | `keyroostctl manpage ./man`          |
+
+The customer-key flags (`--key`, `--key-ascii`, `--key-env`, `--key-ascii-env`)
+now live under `molto` — e.g. `keyroostctl molto customer-key --key-env K`. The
+`piv`, `oath`, `openpgp`, `otp`, `key-name`, `list`, `doctor`, and `completions`
+commands are unchanged.
 
 ## Workspace layout
 
 | Crate | Purpose | External deps |
 |---|---|---|
-| `keyroost-proto` | Pure-Rust Molto2 wire protocol (SM4, SHA-1, SHA-256, APDU, MAC) | none |
-| `keyroost-transport` | PC/SC discovery, Molto2 session, YubiKey CCID serial, OATH + OpenPGP applets | `pcsc` |
-| `keyroost-hid` | USB HID enumeration of FIDO devices via sysfs | none |
-| `keyroost-ctap` | FIDO2/CTAP-HID transport, CBOR, PIN protocols, credential management | none |
+| `keyroost-proto` | Pure-Rust Molto2 wire protocol (SM4, SHA-1, APDU, MAC) | none |
+| `keyroost-transport` | PC/SC discovery, Molto2 session, CCID serial, OATH/OpenPGP/PIV applets, Token2 OTP session | `pcsc`, `aes`/`des` (mgmt-key auth), `zeroize`; `hidapi` on macOS/Windows |
+| `keyroost-hid` | USB HID enumeration of FIDO devices | none on Linux (`sysfs`); `hidapi` on macOS/Windows |
+| `keyroost-ctap` | FIDO2/CTAP-HID transport, CBOR, PIN protocols, credential management | RustCrypto (`sha2`/`hmac`/`aes`/`cbc`/`p256`) for client-PIN, `zeroize`; `hidapi` on macOS/Windows |
 | `keyroost-oath` | Pure-Rust Yubico/Trussed OATH (TOTP/HOTP) byte layer | none |
 | `keyroost-openpgp` | Pure-Rust OpenPGP Card v3.4 byte layer (APDU + BER-TLV) | none |
-| `keyroost-piv` | Pure-Rust PIV (SP 800-73-4) byte layer; read path (status / GET DATA) | none |
+| `keyroost-piv` | Pure-Rust PIV (SP 800-73-4) byte layer; full management + SPKI/PEM | none |
+| `keyroost-token2otp` | Pure-Rust Token2 OTP-on-FIDO byte/codec layer (APDU + HID framing) | RustCrypto (`sha2`/`aes`/`cbc`/`p256`) for ECDH seed encryption, `zeroize` |
 | `keyroost-keyring` | Friendly-name registry (`keys.json`); serial matching | `serde`, `serde_json` |
-| `keyroost-resolve` | Shared key-identity resolution (USB + CCID serials, topology match) | in-tree only |
-| `keyroost-rsakey` | Host-side RSA-2048 keygen + PKCS#1/PKCS#8 (PEM/DER) loading | `rsa`, `rand` |
-| `keyroost-import` | `otpauth://` + Aegis / 2FAS / otpauth-list parsers | `serde`, `serde_json` (behind `bulk`) |
-| `keyroostctl` | Command-line interface | `clap` |
-| `keyroost` | egui desktop GUI | `eframe`, `egui` |
+| `keyroost-resolve` | Shared key-identity resolution (USB + CCID serials, topology match) | none |
+| `keyroost-rsakey` | Host-side RSA-2048 keygen + PKCS#1/PKCS#8 (PEM/DER) loading | `rsa`, `rand`, `zeroize` |
+| `keyroost-import` | `otpauth://` + Aegis / 2FAS / otpauth-list parsers | `serde`/`serde_json`, `scrypt`, `aes-gcm`, `base64`, `zeroize` (all behind `bulk`) |
+| `keyroost-qr` | QR-image 2FA import (PNG/JPEG screenshots, GA export batches) | `rqrr`, `png`, `jpeg-decoder`, `zeroize` |
+| `keyroostctl` | Command-line interface | `clap`, `clap_complete`, `clap_mangen`, `zeroize` |
+| `keyroost` | egui desktop GUI | `eframe`, `egui`, `arboard`, `zeroize` |
 
 ## Protocol
 

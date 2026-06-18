@@ -6,6 +6,126 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-17
+
+### Added
+- **Device-centric bare overview** — running `keyroostctl` with no subcommand
+  now prints a device-centric overview of what is connected, and `list` is
+  enriched with per-device detail (applets, serials, friendly names).
+- **`--name` targeting on every group** — the friendly-name selector now works
+  across all command groups (`molto`, `fido`, `oath`, `openpgp`, `piv`, `otp`),
+  not just a subset, so one named key can be addressed consistently everywhere.
+- **Per-group man pages** — `keyroostctl manpage <DIR>` now writes a directory
+  set of man pages (one per command group) instead of a single page on stdout.
+- **Global `--json` output mode** for the status/query commands — `list` /
+  overview, `*/status`, `*/info`, `fido pin-retries` / `creds-list` /
+  `creds-metadata`, `oath list` / `code`, and `otp list` / `get` / `serial` can
+  now emit machine-readable JSON instead of human text.
+- **OpenPGP PIN management** — `openpgp change-pin`, `openpgp change-admin-pin`,
+  and `openpgp unblock-pin`, closing the OpenPGP PIN-management gap.
+- **Token2 PIN+ fingerprint enrollment** (`fido fingerprint-list` / `enroll` /
+  `rename` / `delete`), FIDO Metadata Service (MDS) metadata in the GUI, and
+  on-device OTP improvements — contributed by
+  [@token2](https://github.com/token2)
+  ([#29](https://github.com/framefilter/keyroost/pull/29),
+  [#30](https://github.com/framefilter/keyroost/pull/30)).
+- **GUI PIV pane detail** — each slot now shows its certificate Subject DN and
+  key algorithm, and a slot holding a key with no certificate is distinguished
+  from an empty one; the pane auto-refreshes after a write
+  ([#31](https://github.com/framefilter/keyroost/issues/31)).
+- **In-tree X.509 Subject-DN reader** (`keyroost-piv`) — a small, panic-safe,
+  dependency-free DER certificate reader backing the slot display above.
+- **Confirm-PIN fields** on the GUI PIV Change-PIN and Change-PUK dialogs, so a
+  mistyped new PIN can't lock the card
+  ([#36](https://github.com/framefilter/keyroost/issues/36)).
+
+### Changed
+- **BREAKING: commands nested under `molto` and `fido` groups.** The flat
+  Molto2 and FIDO subcommands have been moved under `molto …` and `fido …`.
+  Key renames: `info` → `molto info`, `import`/`import-file` →
+  `molto import`/`molto import-file`, `set-seed`/`set-title`/`configure` →
+  `molto seed`/`molto title`/`molto config`, `set-customer-key` →
+  `molto customer-key`, `factory-reset` → `molto reset`, and every `fido-*`
+  command → `fido *` (e.g. `fido-info` → `fido info`, `fido-creds-list` →
+  `fido creds-list`). The customer-key flags (`--key`, `--key-env`, …) now live
+  under `molto customer-key`. See the migration table in the README for the full
+  old→new map.
+
+### Fixed
+- **Firmware-accurate PIN guidance in the GUI** — removed the inaccurate "touch
+  the key to confirm" hint from the FIDO set/change-PIN flow (CTAP PIN changes
+  are not touch-gated) and corrected the PIN/PUK length text per applet
+  ([#36](https://github.com/framefilter/keyroost/issues/36)).
+
+## [0.5.1] - 2026-06-14
+
+A follow-up to the Token2-vs-Molto2 device-identification fix.
+
+### Fixed
+- Molto2 reader matching keys on the product-name word only ("molto"), not the
+  broader Token2 brand string, so a Token2 PIN+ / FIDO2 key is no longer
+  mis-detected as a Molto2 (#21).
+
+## [0.5.0] - 2026-06-14
+
+On-device OTP for Token2 FIDO security keys joins the Molto2 programmer.
+
+### Added
+- **On-device TOTP/HOTP for Token2 FIDO keys (PIN+ / FIDO2+)** — a pure-Rust
+  byte/codec layer (`keyroost-token2otp`) plus CLI (`otp` group) and GUI surface
+  to enumerate, read, add, and delete OTP credentials stored on a Token2 FIDO
+  security key over USB-HID, including the touch/button-HOTP slot and serial
+  read. Contributed by @token2, built from the protocol reference they published
+  (#20).
+
+### Fixed
+- Token2 FIDO keys no longer masquerade as a ghost Molto2 during device
+  enumeration (#21).
+- The crates.io "already published?" probe now sends a User-Agent, which some
+  endpoints require.
+
+### Docs
+- Credit @token2 in a Contributors acknowledgement.
+
+## [0.4.0] - 2026-06-12
+
+Full PIV management, screenshot QR import, package-manager distribution, a
+fuzzing suite, and a broad security-hardening pass.
+
+### Added
+- **Full PIV management** — beyond read-only status: client/card authentication
+  (GENERAL AUTHENTICATE), key generation, certificate import/export,
+  PIN/PUK/management-key changes, and applet reset, plus card-signed
+  certificates (self-sign into a slot, or emit a CSR for a CA).
+- **QR-code import** — pull 2FA secrets from PNG/JPEG screenshots, including
+  Google Authenticator export batches.
+- **Package-manager distribution** — automated release fanout to crates.io, AUR,
+  Homebrew, and winget; `cargo binstall` targets the attested release archives.
+- **Fuzzing** — `cargo-fuzz` targets for every hand-rolled parser, run weekly in
+  CI.
+- **`doctor`, `completions`, and `manpage` subcommands** — environment diagnosis
+  and generated shell-completion / man-page artifacts.
+- **Supply-chain CI** — a `cargo audit` (RUSTSEC) job on lockfile changes and
+  weekly, SHA-256 release checksums, and build-provenance attestation on
+  published archives.
+- **SECURITY.md** — threat model, security invariants, and disclosure policy.
+
+### Changed
+- GUI bulk imports run on a dedicated thread instead of the frame loop, and a
+  single shared scroller backs every capability pane.
+
+### Fixed
+- Broad post-review hardening: zeroize session secrets, CLI-read PINs, imported
+  TOTP seeds, and extracted RSA components on drop; bound device-driven loops
+  and lengths; strict base32 padding; cap attacker-controlled scrypt parameters
+  in encrypted Aegis vaults; reject `otpauth` secrets over the device's 63-byte
+  cap at parse time; atomic owner-only `keys.json` writes with field
+  sanitization; redact secret-bearing APDU bodies from `--debug` traces.
+
+### Notes
+- The crates.io fanout skips publishing until OIDC / trusted-publishing is
+  configured; the other targets and the GitHub Release run unconditionally.
+
 ## [0.3.0] - 2026-06-08
 
 keyroost goes cross-platform: macOS and Windows join Linux, with a HID backend
@@ -120,7 +240,11 @@ multi-vendor hardware-security-key manager, then took its neutral name. Highligh
   external dependencies are `pcsc`, `clap`, `eframe`/`egui`, `serde`, and
   (for RSA keygen/parsing) `rsa`/`rand`.
 
-[Unreleased]: https://github.com/framefilter/keyroost/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/framefilter/keyroost/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/framefilter/keyroost/compare/v0.5.1...v0.6.0
+[0.5.1]: https://github.com/framefilter/keyroost/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/framefilter/keyroost/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/framefilter/keyroost/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/framefilter/keyroost/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/framefilter/keyroost/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/framefilter/keyroost/releases/tag/v0.1.0

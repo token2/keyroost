@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 mod otp_pane;
 mod ui;
 use otp_pane::OtpState;
-use ui::device::{self, CapTab, Caps, DeviceId, DeviceKind, UiDevice};
+use ui::device::{self, CapTab, Caps, Device, DeviceId, DeviceKind, DeviceView};
 use ui::theme::{self, BtnKind, Mode, Palette};
 
 use eframe::egui;
@@ -42,6 +42,42 @@ struct SecurityKeysState {
     change_pin: ChangePinDialog,
     /// Reset-confirmation modal state.
     reset: ResetDialog,
+    /// Enrolled fingerprints, cached after a list. `None` until first read.
+    fingerprints: Option<Vec<keyroost_ctap::Enrollment>>,
+    /// Friendly-name buffer for the "enroll new fingerprint" field.
+    fp_new_name: String,
+    /// Shared live enroll progress, written by the worker after each captured
+    /// sample and polled by the UI each frame to drive the wizard view.
+    fp_progress: Option<std::sync::Arc<std::sync::Mutex<EnrollProgress>>>,
+    /// Pending delete confirmation: the template id awaiting "Are you sure?".
+    fp_confirm_delete: Option<Vec<u8>>,
+    /// Inline rename editor: (template_id, new-name buffer).
+    fp_rename: Option<(Vec<u8>, String)>,
+}
+
+/// Live state of an in-progress fingerprint enrollment, shared between the
+/// capture worker and the UI so the wizard can show per-sample progress.
+#[derive(Clone)]
+struct EnrollProgress {
+    /// Total samples the sensor wants (from getFingerprintSensorInfo / begin).
+    total: u64,
+    /// Samples captured successfully so far.
+    captured: u64,
+    /// Human-readable status of the most recent sample (quality hint).
+    last_message: String,
+    /// Set when the flow finishes (Ok) or fails (Err message).
+    done: Option<Result<(), String>>,
+}
+
+impl Default for EnrollProgress {
+    fn default() -> Self {
+        EnrollProgress {
+            total: 0,
+            captured: 0,
+            last_message: "Touch the sensor to begin\u{2026}".into(),
+            done: None,
+        }
+    }
 }
 
 /// State for the "reset key" confirmation. Reset wipes all credentials and the
@@ -86,6 +122,14 @@ struct UnlockedSession {
     /// of `self`, and credential lists (ids, user blobs) are not per-frame
     /// clone material.
     rps: std::sync::Arc<Vec<(RelyingParty, Vec<Credential>)>>,
+    /// Enrolled fingerprints read at unlock (when the key supports bio), so the
+    /// list shows immediately. `None` when bio is unsupported or the read failed.
+    fingerprints: Option<Vec<keyroost_ctap::Enrollment>>,
+    /// PIN retained for the unlocked session (wiped on lock). Bio writes
+    /// (enroll/rename/delete) re-derive a fresh pinUvAuthToken per operation —
+    /// the authenticator can invalidate a token after a UV-gated bio write, so
+    /// reusing one across operations fails with PIN_AUTH_INVALID (0x33).
+    pin: zeroize::Zeroizing<String>,
 }
 
 /// One FIDO HID device as the armed-reset poll sees it.
@@ -262,6 +306,16 @@ impl OpenPgpSlotSel {
 struct PivState {
     /// Last status read from the selected card.
     status: Option<keyroost_transport::PivStatus>,
+    /// Per-slot detail, in canonical slot order, gathered on each refresh:
+    /// the key algorithm from GET METADATA (`None` if the slot holds no key or
+    /// the firmware lacks the metadata extension), and the certificate's
+    /// Subject DN (`None` if the slot has no certificate or its DN failed to
+    /// parse — degraded silently).
+    slot_keys: Vec<(
+        keyroost_piv::Slot,
+        Option<keyroost_piv::KeyAlg>,
+        Option<String>,
+    )>,
     /// User-facing error from the last read/write.
     error: Option<String>,
     /// Success/info line from the last write operation.
@@ -271,12 +325,14 @@ struct PivState {
     /// Management key (hex) entered to authorize key-gen / cert-import /
     /// set-retries / management-key change. Cleared after use.
     mgmt_key_input: String,
-    /// Change-PIN old/new entries. Cleared after use.
+    /// Change-PIN old/new/confirm entries. Cleared after use.
     pin_old: String,
     pin_new: String,
-    /// Change-PUK old/new entries. Cleared after use.
+    pin_confirm: String,
+    /// Change-PUK old/new/confirm entries. Cleared after use.
     puk_old: String,
     puk_new: String,
+    puk_confirm: String,
     /// Unblock-PIN: PUK + new PIN entries. Cleared after use.
     unblock_puk: String,
     unblock_new_pin: String,
@@ -317,8 +373,10 @@ impl Drop for PivState {
         wipe(&mut self.mgmt_key_input);
         wipe(&mut self.pin_old);
         wipe(&mut self.pin_new);
+        wipe(&mut self.pin_confirm);
         wipe(&mut self.puk_old);
         wipe(&mut self.puk_new);
+        wipe(&mut self.puk_confirm);
         wipe(&mut self.unblock_puk);
         wipe(&mut self.unblock_new_pin);
         wipe(&mut self.retries_pin_auth);
@@ -331,14 +389,17 @@ impl Default for PivState {
     fn default() -> Self {
         PivState {
             status: None,
+            slot_keys: Vec::new(),
             error: None,
             notice: None,
             loaded: false,
             mgmt_key_input: String::new(),
             pin_old: String::new(),
             pin_new: String::new(),
+            pin_confirm: String::new(),
             puk_old: String::new(),
             puk_new: String::new(),
+            puk_confirm: String::new(),
             unblock_puk: String::new(),
             unblock_new_pin: String::new(),
             retries_pin: 3,
@@ -551,6 +612,7 @@ fn main() -> eframe::Result<()> {
                 egui_ctx: Some(cc.egui_ctx.clone()),
                 devices_dirty,
                 reader_watch: Some(reader_watch),
+                mds: ui::mds::MdsDb::load_bundled(),
                 ..Default::default()
             };
             Ok(Box::new(app))
@@ -581,7 +643,7 @@ struct App {
     /// Bulk-import dialog state.
     bulk_dialog: BulkDialog,
     /// Unified device list (physical keys + Molto2 tokens), most recent scan.
-    devices: Vec<UiDevice>,
+    devices: Vec<Device>,
     /// Selected device id — stable across refreshes so the pane doesn't jump
     /// when an *unrelated* key is plugged or unplugged.
     selected_device: Option<DeviceId>,
@@ -600,6 +662,15 @@ struct App {
     filter: String,
     /// FIDO security-key view state (CTAP info, PIN session, errors).
     security_keys: SecurityKeysState,
+    /// FIDO Metadata Service database (bundled, plus any refreshed download).
+    mds: ui::mds::MdsDb,
+    /// Cached icon texture for the selected device's AAGUID, with the AAGUID it
+    /// was decoded for so we re-upload only when the device changes.
+    mds_icon: Option<(String, egui::TextureHandle)>,
+    /// Last TOTP window index seen while the On-device OTP tab was showing live
+    /// codes. When the window rolls over, the codes have expired, so the pane
+    /// auto-reloads. `None` until first observed.
+    otp_last_window: Option<u64>,
     /// OATH (TOTP) view state.
     oath: OathState,
     /// OpenPGP view state.
@@ -1498,6 +1569,9 @@ impl App {
             let result = Self::open_and_unlock(&path, &pin).map_err(|e| e.to_string());
             Box::new(move |app: &mut App| match result {
                 Ok(sess) => {
+                    // Surface fingerprints read during unlock so the list shows
+                    // without a separate Reload.
+                    app.security_keys.fingerprints = sess.fingerprints.clone();
                     app.security_keys.session = Some(sess);
                     app.security_keys.error = None;
                 }
@@ -1515,12 +1589,18 @@ impl App {
             return Err("device is U2F-only".into());
         }
         let info = keyroost_ctap::get_info(&mut dev)?;
-        let token = keyroost_ctap::client_pin::get_pin_uv_auth_token(
-            &mut dev,
-            pin,
-            &info,
-            keyroost_ctap::client_pin::permissions::CREDENTIAL_MANAGEMENT,
-        )?;
+        // Request credential-management permission, plus bio-enrollment when the
+        // key supports it, so the one cached session token authorizes both
+        // passkey management and fingerprint operations. Permissions are a
+        // bitmask; only OR in BIO_ENROLLMENT when advertised, since asking for an
+        // unsupported permission would make the whole unlock fail.
+        let mut perms = keyroost_ctap::client_pin::permissions::CREDENTIAL_MANAGEMENT;
+        if info.option("bioEnroll").is_some()
+            || info.option("userVerificationMgmtPreview").is_some()
+        {
+            perms |= keyroost_ctap::client_pin::permissions::BIO_ENROLLMENT;
+        }
+        let token = keyroost_ctap::client_pin::get_pin_uv_auth_token(&mut dev, pin, &info, perms)?;
         // Hand the manager a clone and keep `token` for the cached session; the
         // token stays valid for the device session, so this avoids a redundant
         // second PIN/ECDH exchange just to rebuild it.
@@ -1533,10 +1613,29 @@ impl App {
             let creds = mgr.list_credentials(&rp.rp_id_hash).unwrap_or_default();
             rps.push((rp, creds));
         }
+        // While the session is fresh, also read enrolled fingerprints (when the
+        // key supports bio) so the Fingerprints list appears immediately without
+        // a separate Reload. Best-effort: a failure here doesn't block unlock.
+        let fingerprints = if info.option("bioEnroll").is_some()
+            || info.option("userVerificationMgmtPreview").is_some()
+        {
+            let cmd_code = if info.option("bioEnroll").is_some() {
+                keyroost_ctap::bio_enroll::CTAP2_BIO_ENROLLMENT
+            } else {
+                keyroost_ctap::bio_enroll::CTAP2_BIO_ENROLLMENT_PREVIEW
+            };
+            let mut bio =
+                keyroost_ctap::bio_enroll::BioEnrollment::new(&mut dev, token.clone(), cmd_code);
+            bio.enumerate().ok()
+        } else {
+            None
+        };
         Ok(UnlockedSession {
             token,
             metadata,
             rps: std::sync::Arc::new(rps),
+            fingerprints,
+            pin: zeroize::Zeroizing::new(pin.to_owned()),
         })
     }
 
@@ -1559,8 +1658,9 @@ impl App {
             return;
         };
         let token = session.token;
+        let pin = session.pin;
         self.spawn_job("Refreshing credentials\u{2026}", move || {
-            let result = Self::refresh_with_token(&path, token).map_err(|e| e.to_string());
+            let result = Self::refresh_with_token(&path, token, pin).map_err(|e| e.to_string());
             Box::new(move |app: &mut App| match result {
                 Ok(fresh) => app.security_keys.session = Some(fresh),
                 Err(e) => app.security_keys.error = Some(format!("refresh failed: {}", e)),
@@ -1571,6 +1671,7 @@ impl App {
     fn refresh_with_token(
         path: &std::path::Path,
         token: PinUvAuthToken,
+        pin: zeroize::Zeroizing<String>,
     ) -> Result<UnlockedSession, Box<dyn std::error::Error>> {
         let (mut dev, _) = CtapHidDevice::open(path)?;
         let info = keyroost_ctap::get_info(&mut dev)?;
@@ -1587,7 +1688,249 @@ impl App {
             token,
             metadata,
             rps: std::sync::Arc::new(rps),
+            fingerprints: None,
+            pin,
         })
+    }
+
+    /// Pick the bio-enrollment command byte from the cached AuthenticatorInfo.
+    /// Mirrors the CLI helper: standard 0x09 when `bioEnroll` is advertised,
+    /// else the preview 0x40.
+    fn bio_cmd_code(&self) -> Option<u8> {
+        let info = self.security_keys.info.as_ref()?;
+        if info.option("bioEnroll").is_some() {
+            Some(keyroost_ctap::bio_enroll::CTAP2_BIO_ENROLLMENT)
+        } else if info.option("userVerificationMgmtPreview").is_some() {
+            Some(keyroost_ctap::bio_enroll::CTAP2_BIO_ENROLLMENT_PREVIEW)
+        } else {
+            None
+        }
+    }
+
+    /// Open the device, derive a FRESH bio pinUvAuthToken from the PIN, and run
+    /// `f` with an armed BioEnrollment. A fresh token per operation is required:
+    /// the authenticator can invalidate a token after a UV-gated bio write, so
+    /// reusing the unlock token across operations fails with 0x33.
+    fn with_fresh_bio<T>(
+        path: &std::path::Path,
+        pin: &str,
+        f: impl FnOnce(&mut keyroost_ctap::bio_enroll::BioEnrollment) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let (mut dev, init) = CtapHidDevice::open(path).map_err(|e| e.to_string())?;
+        if !init.supports_cbor() {
+            return Err("device is U2F-only".into());
+        }
+        let info = keyroost_ctap::get_info(&mut dev).map_err(|e| e.to_string())?;
+        let cmd_code = if info.option("bioEnroll").is_some() {
+            keyroost_ctap::bio_enroll::CTAP2_BIO_ENROLLMENT
+        } else if info.option("userVerificationMgmtPreview").is_some() {
+            keyroost_ctap::bio_enroll::CTAP2_BIO_ENROLLMENT_PREVIEW
+        } else {
+            return Err("key does not support fingerprint enrollment".into());
+        };
+        let token = keyroost_ctap::client_pin::get_pin_uv_auth_token(
+            &mut dev,
+            pin,
+            &info,
+            keyroost_ctap::client_pin::permissions::BIO_ENROLLMENT,
+        )
+        .map_err(|e| e.to_string())?;
+        let mut bio = keyroost_ctap::bio_enroll::BioEnrollment::new(&mut dev, token, cmd_code);
+        f(&mut bio)
+    }
+
+    /// Refresh the cached fingerprint list.
+    fn refresh_fingerprints(&mut self) {
+        if self.busy() {
+            return;
+        }
+        let Some(path) = self.selected_fido_path() else {
+            return;
+        };
+        let Some(session) = self.security_keys.session.as_ref() else {
+            self.security_keys.error = Some("unlock the key first".into());
+            return;
+        };
+        let pin = session.pin.clone();
+        self.spawn_job("Reading fingerprints\u{2026}", move || {
+            let result = Self::with_fresh_bio(&path, &pin, |bio| {
+                bio.enumerate().map_err(|e| e.to_string())
+            });
+            Box::new(move |app: &mut App| match result {
+                Ok(list) => {
+                    app.security_keys.fingerprints = Some(list);
+                    app.security_keys.error = None;
+                }
+                Err(e) => app.security_keys.error = Some(format!("fingerprint list failed: {e}")),
+            })
+        });
+    }
+
+    /// Enroll a new fingerprint end-to-end (begin + capture loop) on a worker.
+    /// Writes live progress to a shared cell so the UI can show a wizard with
+    /// per-sample quality feedback.
+    fn enroll_fingerprint(&mut self) {
+        if self.busy() {
+            return;
+        }
+        let Some(path) = self.selected_fido_path() else {
+            return;
+        };
+        let Some(session) = self.security_keys.session.as_ref() else {
+            self.security_keys.error = Some("unlock the key first".into());
+            return;
+        };
+        let pin = session.pin.clone();
+        let name = self.security_keys.fp_new_name.trim().to_owned();
+        let name = if name.is_empty() { None } else { Some(name) };
+
+        // Shared progress cell the worker updates and the UI polls each frame.
+        let progress = std::sync::Arc::new(std::sync::Mutex::new(EnrollProgress::default()));
+        self.security_keys.fp_progress = Some(progress.clone());
+
+        self.spawn_job("Enrolling fingerprint\u{2026}", move || {
+            use keyroost_ctap::bio_enroll::sample_status_message;
+            let result = (|| -> Result<Vec<keyroost_ctap::Enrollment>, String> {
+                let (mut dev, init) = CtapHidDevice::open(&path).map_err(|e| e.to_string())?;
+                if !init.supports_cbor() {
+                    return Err("device is U2F-only".into());
+                }
+                let info = keyroost_ctap::get_info(&mut dev).map_err(|e| e.to_string())?;
+                let cmd_code = if info.option("bioEnroll").is_some() {
+                    keyroost_ctap::bio_enroll::CTAP2_BIO_ENROLLMENT
+                } else {
+                    keyroost_ctap::bio_enroll::CTAP2_BIO_ENROLLMENT_PREVIEW
+                };
+                // Fresh bio token per enroll, derived from the session PIN.
+                let token = keyroost_ctap::client_pin::get_pin_uv_auth_token(
+                    &mut dev,
+                    &pin,
+                    &info,
+                    keyroost_ctap::client_pin::permissions::BIO_ENROLLMENT,
+                )
+                .map_err(|e| e.to_string())?;
+                let mut bio =
+                    keyroost_ctap::bio_enroll::BioEnrollment::new(&mut dev, token, cmd_code);
+
+                // Learn how many samples the sensor wants, for the progress bar.
+                let total = bio
+                    .sensor_info()
+                    .map(|i| i.max_capture_samples)
+                    .unwrap_or(0);
+
+                let (template_id, mut status) =
+                    bio.enroll_begin(None).map_err(|e| e.to_string())?;
+                // captured = total - remaining (clamped), so the bar advances
+                // even though the protocol reports "remaining".
+                let update = |p: &std::sync::Mutex<EnrollProgress>,
+                              total: u64,
+                              remaining: u64,
+                              msg: &str| {
+                    if let Ok(mut g) = p.lock() {
+                        g.total = total;
+                        g.captured = total.saturating_sub(remaining);
+                        g.last_message = msg.to_string();
+                    }
+                };
+                update(
+                    &progress,
+                    total.max(status.remaining_samples + 1),
+                    status.remaining_samples,
+                    sample_status_message(status.last_sample_status),
+                );
+
+                while status.remaining_samples > 0 {
+                    status = bio
+                        .enroll_capture_next(&template_id, None)
+                        .map_err(|e| e.to_string())?;
+                    let total = total.max(status.remaining_samples + 1);
+                    update(
+                        &progress,
+                        total,
+                        status.remaining_samples,
+                        sample_status_message(status.last_sample_status),
+                    );
+                }
+
+                if let Some(n) = &name {
+                    bio.set_friendly_name(&template_id, n)
+                        .map_err(|e| e.to_string())?;
+                }
+                bio.enumerate().map_err(|e| e.to_string())
+            })();
+
+            // Mark the shared cell done (success or failure) for the UI.
+            if let Ok(mut g) = progress.lock() {
+                g.done = Some(result.as_ref().map(|_| ()).map_err(|e| e.clone()));
+                if result.is_ok() {
+                    g.last_message = "Fingerprint enrolled.".into();
+                    g.captured = g.total;
+                }
+            }
+
+            Box::new(move |app: &mut App| {
+                match result {
+                    Ok(list) => {
+                        app.security_keys.fingerprints = Some(list);
+                        app.security_keys.fp_new_name.clear();
+                        app.security_keys.error = None;
+                    }
+                    Err(e) => app.security_keys.error = Some(format!("enroll failed: {e}")),
+                }
+                // Leave fp_progress in place briefly so the UI shows the final
+                // "enrolled" state; it's cleared on the next user action.
+            })
+        });
+    }
+
+    /// Delete one fingerprint by template id, then refresh the list.
+    fn delete_fingerprint(&mut self, template_id: Vec<u8>) {
+        if self.busy() {
+            return;
+        }
+        let Some(path) = self.selected_fido_path() else {
+            return;
+        };
+        let Some(session) = self.security_keys.session.as_ref() else {
+            return;
+        };
+        let pin = session.pin.clone();
+        self.spawn_job("Deleting fingerprint\u{2026}", move || {
+            let result = Self::with_fresh_bio(&path, &pin, |bio| {
+                bio.remove_enrollment(&template_id)
+                    .map_err(|e| e.to_string())?;
+                bio.enumerate().map_err(|e| e.to_string())
+            });
+            Box::new(move |app: &mut App| match result {
+                Ok(list) => app.security_keys.fingerprints = Some(list),
+                Err(e) => app.security_keys.error = Some(format!("delete failed: {e}")),
+            })
+        });
+    }
+
+    /// Rename one fingerprint, then refresh the list.
+    fn rename_fingerprint(&mut self, template_id: Vec<u8>, new_name: String) {
+        if self.busy() {
+            return;
+        }
+        let Some(path) = self.selected_fido_path() else {
+            return;
+        };
+        let Some(session) = self.security_keys.session.as_ref() else {
+            return;
+        };
+        let pin = session.pin.clone();
+        self.spawn_job("Renaming fingerprint\u{2026}", move || {
+            let result = Self::with_fresh_bio(&path, &pin, |bio| {
+                bio.set_friendly_name(&template_id, &new_name)
+                    .map_err(|e| e.to_string())?;
+                bio.enumerate().map_err(|e| e.to_string())
+            });
+            Box::new(move |app: &mut App| match result {
+                Ok(list) => app.security_keys.fingerprints = Some(list),
+                Err(e) => app.security_keys.error = Some(format!("rename failed: {e}")),
+            })
+        });
     }
 
     fn delete_credential(&mut self, cred_id: Vec<u8>) {
@@ -1600,10 +1943,11 @@ impl App {
         let token = session.token.clone();
         // The refresh after delete needs its own token; clone for the chained op.
         let token_refresh = token.clone();
+        let pin_refresh = session.pin.clone();
         self.spawn_job("Deleting credential\u{2026}", move || {
             // Delete, then re-list in the same job so the UI updates atomically.
             let result = Self::try_delete(&path, token, &cred_id)
-                .and_then(|()| Self::refresh_with_token(&path, token_refresh))
+                .and_then(|()| Self::refresh_with_token(&path, token_refresh, pin_refresh))
                 .map_err(|e| e.to_string());
             Box::new(move |app: &mut App| match result {
                 Ok(fresh) => {
@@ -1641,7 +1985,7 @@ impl App {
             self.security_keys.error = Some("both PIN fields are required".into());
             return;
         }
-        self.spawn_job("Changing PIN\u{2026} (touch)", move || {
+        self.spawn_job("Changing PIN\u{2026}", move || {
             let result = Self::try_change_pin(&path, &old, &new).map_err(|e| e.to_string());
             Box::new(move |app: &mut App| match result {
                 Ok(()) => {
@@ -1686,7 +2030,7 @@ impl App {
             self.security_keys.error = Some("the two PINs don't match".into());
             return;
         }
-        self.spawn_job("Setting PIN\u{2026} (touch the key)", move || {
+        self.spawn_job("Setting PIN\u{2026}", move || {
             let result = (|| -> Result<(), String> {
                 let (mut dev, _) = CtapHidDevice::open(&path).map_err(|e| e.to_string())?;
                 keyroost_ctap::client_pin::set_pin(&mut dev, &new).map_err(|e| e.to_string())
@@ -2940,7 +3284,7 @@ impl App {
     }
 
     /// The currently selected device, if the id still resolves to a present one.
-    fn selected_device(&self) -> Option<&UiDevice> {
+    fn selected_device(&self) -> Option<&Device> {
         let id = self.selected_device.as_ref()?;
         self.devices.iter().find(|d| &d.id == id)
     }
@@ -3094,17 +3438,45 @@ impl App {
         };
         let for_device = self.selected_device.clone();
         self.spawn_job("Reading PIV status\u{2026}", move || {
-            let result = keyroost_transport::PivSession::open(&reader).and_then(|mut s| s.status());
+            // Alongside the status, probe each slot's key algorithm via GET
+            // METADATA. This surfaces an algorithm (and confirms a key exists)
+            // even for a slot with no certificate; `None` covers an empty slot
+            // or firmware without the metadata extension.
+            let result = keyroost_transport::PivSession::open(&reader).map(|mut s| {
+                let status = s.status();
+                let slot_keys: Vec<_> = keyroost_piv::Slot::all()
+                    .into_iter()
+                    .map(|slot| {
+                        let alg = s
+                            .metadata(slot.key_ref())
+                            .and_then(|m| m.algorithm)
+                            .and_then(keyroost_piv::KeyAlg::from_id);
+                        // Pull the slot's certificate (if any) and extract its
+                        // Subject DN for display. Any failure — no cert, read
+                        // error, or unparseable DER — degrades to `None` so the
+                        // pane never breaks on a malformed certificate.
+                        let subject = s
+                            .read_certificate(slot)
+                            .ok()
+                            .flatten()
+                            .and_then(|der| keyroost_piv::x509_parse::parse_subject_dn(&der).ok())
+                            .map(|dn| dn.to_string());
+                        (slot, alg, subject)
+                    })
+                    .collect();
+                (status, slot_keys)
+            });
             Box::new(move |app: &mut App| {
                 if app.selected_device != for_device {
                     return; // selection changed mid-read; discard
                 }
                 match result {
-                    Ok(status) => {
+                    Ok((Ok(status), slot_keys)) => {
                         app.piv.status = Some(status);
+                        app.piv.slot_keys = slot_keys;
                         app.piv.loaded = true;
                     }
-                    Err(e) => app.piv.error = Some(e.to_string()),
+                    Ok((Err(e), _)) | Err(e) => app.piv.error = Some(e.to_string()),
                 }
             })
         });
@@ -3122,6 +3494,9 @@ impl App {
                 app.piv.status = Some(status);
                 app.piv.error = None;
                 app.piv.notice = Some(notice);
+                // Re-read so per-slot key algorithms (and anything the write
+                // touched) reflect the new state without a manual Refresh.
+                app.load_piv_status();
             }
             Err(e) => {
                 app.piv.notice = None;
@@ -3135,6 +3510,11 @@ impl App {
         let Some(name) = self.selected_oath_reader() else {
             return;
         };
+        if self.piv.pin_new != self.piv.pin_confirm {
+            self.piv.notice = None;
+            self.piv.error = Some("the two new PINs don't match".into());
+            return;
+        }
         let (old, new) = (self.piv.pin_old.clone(), self.piv.pin_new.clone());
         self.piv.notice = None;
         self.spawn_job("Changing PIV PIN\u{2026}", move || {
@@ -3146,6 +3526,7 @@ impl App {
             Box::new(move |app: &mut App| {
                 wipe(&mut app.piv.pin_old);
                 wipe(&mut app.piv.pin_new);
+                wipe(&mut app.piv.pin_confirm);
                 Self::apply_piv_write(app, result, "PIN changed.".into());
             })
         });
@@ -3155,6 +3536,11 @@ impl App {
         let Some(name) = self.selected_oath_reader() else {
             return;
         };
+        if self.piv.puk_new != self.piv.puk_confirm {
+            self.piv.notice = None;
+            self.piv.error = Some("the two new PUKs don't match".into());
+            return;
+        }
         let (old, new) = (self.piv.puk_old.clone(), self.piv.puk_new.clone());
         self.piv.notice = None;
         self.spawn_job("Changing PUK\u{2026}", move || {
@@ -3166,6 +3552,7 @@ impl App {
             Box::new(move |app: &mut App| {
                 wipe(&mut app.piv.puk_old);
                 wipe(&mut app.piv.puk_new);
+                wipe(&mut app.piv.puk_confirm);
                 Self::apply_piv_write(app, result, "PUK changed.".into());
             })
         });
@@ -3556,7 +3943,7 @@ impl App {
     /// the Molto2 hero: open the inline field, cancel it, or commit the name.
     /// The flags are collected during the `ui` closures (where `self` is already
     /// borrowed) and applied here afterwards.
-    fn apply_rename_actions(&mut self, dev: &UiDevice, open: bool, cancel: bool, save: bool) {
+    fn apply_rename_actions(&mut self, dev: &Device, open: bool, cancel: bool, save: bool) {
         if open {
             self.rename_open = true;
             self.rename_input = dev.name.clone().unwrap_or_default();
@@ -3684,7 +4071,7 @@ fn glyph_tile(
 }
 
 /// Does the device match the sidebar filter text?
-fn matches_filter(d: &UiDevice, q: &str) -> bool {
+fn matches_filter(d: &Device, q: &str) -> bool {
     let q = q.trim().to_ascii_lowercase();
     if q.is_empty() {
         return true;
@@ -3767,6 +4154,58 @@ fn card_note(ui: &mut egui::Ui, p: &Palette, t: &str) {
             .font(theme::f_reg(12.0))
             .color(p.txt3),
     );
+}
+
+/// A key/value detail row for the device-metadata card: a muted fixed-width
+/// label on the left, the value on the right. Wraps long values.
+fn mds_kv(ui: &mut egui::Ui, p: &Palette, key: &str, value: &str) {
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [150.0, 16.0],
+            egui::Label::new(
+                egui::RichText::new(key)
+                    .font(theme::f_reg(12.0))
+                    .color(p.txt3),
+            )
+            .wrap_mode(egui::TextWrapMode::Extend),
+        );
+        ui.label(
+            egui::RichText::new(value)
+                .font(theme::f_reg(12.5))
+                .color(p.txt2),
+        );
+    });
+    ui.add_space(3.0);
+}
+
+/// One "label  value" cell in the metadata grid, occupying width `w`. The label
+/// is muted and fixed-width; the value sits immediately to its right so the pair
+/// reads as a unit rather than drifting apart.
+fn mds_cell(ui: &mut egui::Ui, p: &Palette, key: &str, value: &str, w: f32) {
+    let label_w = 138.0_f32.min(w * 0.5);
+    ui.allocate_ui(egui::vec2(w, 18.0), |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            ui.add_sized(
+                [label_w, 16.0],
+                egui::Label::new(
+                    egui::RichText::new(key)
+                        .font(theme::f_reg(12.0))
+                        .color(p.txt3),
+                )
+                .wrap_mode(egui::TextWrapMode::Extend)
+                .halign(egui::Align::LEFT),
+            );
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(value)
+                        .font(theme::f_reg(12.5))
+                        .color(p.txt2),
+                )
+                .wrap_mode(egui::TextWrapMode::Truncate),
+            );
+        });
+    });
 }
 
 /// A themed single-line text input with a fixed-width label — the non-password
@@ -4015,7 +4454,7 @@ fn paint_x_icon(ui: &egui::Ui, center: egui::Pos2, color: egui::Color32) {
 /// Paint one selectable device row. The whole row is a single painter-drawn
 /// click target (no nested widgets), so clicking anywhere in it selects the
 /// device — fixing the "only the gaps are clickable" inconsistency.
-fn device_row(ui: &mut egui::Ui, p: &Palette, dev: &UiDevice, selected: bool) -> bool {
+fn device_row(ui: &mut egui::Ui, p: &Palette, dev: &Device, selected: bool) -> bool {
     let w = ui.available_width();
     let h = 68.0;
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
@@ -4110,28 +4549,17 @@ fn device_row(ui: &mut egui::Ui, p: &Palette, dev: &UiDevice, selected: bool) ->
     });
     ui.painter()
         .galley(egui::pos2(tx, rect.top() + 26.0), galley, p.txt);
-    // capability pills
+    // capability pills — labels come from the shared cap_badges() vocabulary so
+    // the GUI and the CLI overview never disagree. Tokens keep the amber accent.
     let py = rect.top() + 46.0;
-    if token {
-        paint_pill(
-            ui,
-            egui::pos2(tx, py),
-            "TOTP token",
-            p.brand,
-            p.brand_soft(),
-        );
+    let (fg, bg) = if token {
+        (p.brand, p.brand_soft())
     } else {
-        let mut px = tx;
-        for (cap, label) in [
-            (Caps::FIDO2, "FIDO2"),
-            (Caps::OATH, "OATH"),
-            (Caps::PGP, "PGP"),
-            (Caps::PIV, "PIV"),
-        ] {
-            if dev.caps.has(cap) {
-                px += paint_pill(ui, egui::pos2(px, py), label, p.txt2, p.raised2) + 5.0;
-            }
-        }
+        (p.txt2, p.raised2)
+    };
+    let mut px = tx;
+    for label in dev.cap_badges() {
+        px += paint_pill(ui, egui::pos2(px, py), label, fg, bg) + 5.0;
     }
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -4196,6 +4624,12 @@ impl eframe::App for App {
         // Apply any results from background device jobs and the import
         // thread before drawing.
         self.drain_worker();
+        // While a device job is in flight (e.g. fingerprint enrollment writing
+        // live progress to a shared cell), keep the frame loop ticking so the UI
+        // reflects per-sample updates instead of freezing until the job ends.
+        if self.busy() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
         self.drain_import();
         let p = self.palette();
         // Rebuilding + re-applying egui Visuals every frame is wasted work;
@@ -4274,11 +4708,51 @@ impl eframe::App for App {
         // Only keep ticking when something actually animates (OATH countdown
         // rings, the Molto2 view, or the "copied" flash) — not on every static
         // pane, which would burn frames and feel sluggish.
+        // Auto-refresh on-device TOTP codes when their time window rolls over.
+        // The device returns codes only at read time, so once the window flips
+        // the shown codes are stale; reload them (like clicking Refresh). Keyed
+        // on the shortest period among the visible TOTP rows so a 30s entry
+        // refreshes on its boundary even if a 60s entry is also present.
+        if matches!(self.cap_tab, CapTab::Otp) && self.otp.loaded {
+            let min_period = self
+                .otp
+                .rows
+                .iter()
+                .filter(|r| r.type_str.eq_ignore_ascii_case("TOTP") && r.code.is_some())
+                .map(|r| if r.period == 0 { 30 } else { r.period as u64 })
+                .min();
+            if let Some(period) = min_period {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let window = now / period;
+                match self.otp_last_window {
+                    Some(prev) if prev != window => {
+                        self.otp_last_window = Some(window);
+                        self.load_otp_entries();
+                    }
+                    None => self.otp_last_window = Some(window),
+                    _ => {}
+                }
+            }
+        } else {
+            // Reset when leaving the tab so re-entry doesn't trigger a spurious
+            // reload on a window that "changed" while we weren't watching.
+            self.otp_last_window = None;
+        }
+
         let animating = self.copied.is_some()
             || matches!(self.cap_tab, CapTab::Oath)
             || (matches!(self.cap_tab, CapTab::Overview)
                 && self.oath.loaded
                 && !self.oath.creds.is_empty())
+            || (matches!(self.cap_tab, CapTab::Otp)
+                && self
+                    .otp
+                    .rows
+                    .iter()
+                    .any(|r| r.type_str.eq_ignore_ascii_case("TOTP") && r.code.is_some()))
             || self
                 .selected_device()
                 .is_some_and(|d| d.kind == DeviceKind::Token);
@@ -4709,7 +5183,7 @@ impl App {
     }
 
     /// Device hero strip at the top of a key's pane.
-    fn device_hero(&mut self, ui: &mut egui::Ui, p: &Palette, dev: &UiDevice) {
+    fn device_hero(&mut self, ui: &mut egui::Ui, p: &Palette, dev: &Device) {
         let mut open_rename = false;
         let mut do_save = false;
         let mut do_cancel = false;
@@ -4782,7 +5256,7 @@ impl App {
 
     /// Capability tab bar under the hero. The active tab gets `txt` + an accent
     /// underline; the rest are muted.
-    fn cap_tabs(&mut self, ui: &mut egui::Ui, p: &Palette, dev: &UiDevice) {
+    fn cap_tabs(&mut self, ui: &mut egui::Ui, p: &Palette, dev: &Device) {
         ui.add_space(12.0);
         let mut next = None;
         ui.horizontal(|ui| {
@@ -4855,10 +5329,174 @@ impl App {
         go
     }
 
+    /// Device-metadata card (FIDO Metadata Service): vendor icon, description,
+    /// and certification status for the selected key's AAGUID. Shown only when
+    /// the AAGUID is known to the MDS dataset. Renders nothing otherwise so it
+    /// doesn't clutter the overview for unknown keys.
+    fn mds_card(&mut self, ui: &mut egui::Ui, p: &Palette, _dev: &Device) {
+        let Some(aaguid) = self.security_keys.info.as_ref().map(|i| i.aaguid) else {
+            return;
+        };
+        // Look up first; clone the few fields we render so we don't hold an
+        // immutable borrow of `self.mds` across the icon-texture mutation.
+        let Some(entry) = self.mds.get(&aaguid).cloned() else {
+            return;
+        };
+        let key = ui::aaguid::format_aaguid_pub(&aaguid);
+        // Live versions reported by the device's authenticatorGetInfo, preferred
+        // over the MDS statement's copy since they describe the actual unit.
+        let device_versions: Vec<String> = self
+            .security_keys
+            .info
+            .as_ref()
+            .map(|i| i.versions.clone())
+            .unwrap_or_default();
+
+        // Decode + upload the icon once per AAGUID, cached in `self.mds_icon`.
+        if let Some(icon_uri) = entry.icon.as_deref() {
+            let need = self
+                .mds_icon
+                .as_ref()
+                .map(|(k, _)| k != &key)
+                .unwrap_or(true);
+            if need {
+                if let Some(img) = ui::mds::decode_icon(icon_uri) {
+                    let tex = ui.ctx().load_texture(
+                        format!("mds-icon-{key}"),
+                        img,
+                        egui::TextureOptions::LINEAR,
+                    );
+                    self.mds_icon = Some((key.clone(), tex));
+                } else {
+                    self.mds_icon = None;
+                }
+            }
+        } else {
+            self.mds_icon = None;
+        }
+
+        theme::card_frame(p).show(ui, |ui| {
+            // Claim the full row width so this card matches the capability cards
+            // below it (which stretch via their right-aligned "Manage" header).
+            ui.set_min_width(ui.available_width());
+            self.card_head_plain(ui, p, "Device metadata (FIDO MDS)", "mds");
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if let Some((k, tex)) = &self.mds_icon {
+                    if k == &key {
+                        let side = 44.0;
+                        ui.add(
+                            egui::Image::from_texture(tex)
+                                .fit_to_exact_size(egui::vec2(side, side)),
+                        );
+                        ui.add_space(12.0);
+                    }
+                }
+                ui.vertical(|ui| {
+                    if !entry.description.is_empty() {
+                        ui.label(
+                            egui::RichText::new(&entry.description)
+                                .font(theme::f_sb(14.0))
+                                .color(p.txt),
+                        );
+                        ui.add_space(3.0);
+                    }
+                    // Certification badge (level highlighted) + advisory flag.
+                    if let Some(label) = entry.certification_label() {
+                        let (fg, bg) = if entry.is_advisory() {
+                            (p.err, p.warn_soft())
+                        } else {
+                            (p.ok, p.ok_soft())
+                        };
+                        theme::pill(ui, &label, fg, bg);
+                    }
+                });
+            });
+
+            ui.add_space(12.0);
+
+            // Short fields go into a two-column grid (label/value pairs, two
+            // pairs per row) so the card fills its width and columns align.
+            // Long fields (Versions, AAGUID) get their own full-width rows below.
+            let mut pairs: Vec<(&str, String)> = Vec::new();
+            if let Some(lvl) = entry.certification_level() {
+                pairs.push(("Certification level", lvl.to_string()));
+            }
+            if let Some(date) = &entry.effective_date {
+                let d = date.split(['T', ' ']).next().unwrap_or(date);
+                pairs.push(("Certified since", d.to_string()));
+            }
+            if let Some(fam) = &entry.protocol_family {
+                pairs.push(("Protocol family", fam.clone()));
+            }
+
+            // Lay the short fields out as tight "label  value" cells distributed
+            // across the card width. Pick 1-3 columns based on available width so
+            // each value sits right next to its label and the row stays filled.
+            let avail = ui.available_width();
+            let cols = if avail >= 760.0 {
+                3
+            } else if avail >= 470.0 {
+                2
+            } else {
+                1
+            };
+            let cell_w = (avail - 18.0 * (cols as f32 - 1.0)) / cols as f32;
+            egui::Grid::new("mds-meta-grid")
+                .num_columns(cols)
+                .spacing(egui::vec2(18.0, 10.0))
+                .min_col_width(0.0)
+                .show(ui, |ui| {
+                    for (i, (k, v)) in pairs.iter().enumerate() {
+                        mds_cell(ui, p, k, v, cell_w);
+                        if (i + 1) % cols == 0 {
+                            ui.end_row();
+                        }
+                    }
+                    if pairs.len() % cols != 0 {
+                        ui.end_row();
+                    }
+                });
+
+            // Long, full-width fields.
+            let versions = if !device_versions.is_empty() {
+                device_versions
+            } else {
+                entry.mds_versions.clone()
+            };
+            ui.add_space(8.0);
+            if !versions.is_empty() {
+                mds_kv(ui, p, "Versions", &versions.join(", "));
+            }
+            mds_kv(ui, p, "AAGUID", &key);
+        });
+        ui.add_space(14.0);
+    }
+
+    /// Card header with no "Manage →" affordance (for read-only info cards).
+    fn card_head_plain(
+        &mut self,
+        ui: &mut egui::Ui,
+        p: &Palette,
+        title: &str,
+        topic: &'static str,
+    ) {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(title)
+                    .font(theme::f_sb(14.5))
+                    .color(p.txt),
+            );
+            ui.add_space(6.0);
+            self.help_dot(ui, p, topic);
+        });
+    }
+
     /// Overview tab: one summary card per capability, each with a `Manage →` jump.
     /// Scrolling comes from the shared capability-pane scroller in `central`.
-    fn overview(&mut self, ui: &mut egui::Ui, p: &Palette, dev: &UiDevice) {
+    fn overview(&mut self, ui: &mut egui::Ui, p: &Palette, dev: &Device) {
         ui.vertical(|ui| {
+            self.mds_card(ui, p, dev);
             if dev.caps.has(Caps::FIDO2) {
                 theme::card_frame(p).show(ui, |ui| {
                     if self.card_head(ui, p, "Passkeys & sign-in (FIDO2)", "fido2") {
@@ -5013,6 +5651,47 @@ impl App {
                     }
                 });
             }
+            if dev.caps.has(Caps::OTP) {
+                ui.add_space(14.0);
+                theme::card_frame(p).show(ui, |ui| {
+                    if self.card_head(ui, p, "On-device OTP", "otp") {
+                        self.cap_tab = CapTab::Otp;
+                    }
+                    ui.add_space(8.0);
+                    if self.otp.loaded && !self.otp.rows.is_empty() {
+                        let total = self.otp.rows.len();
+                        for row in self.otp.rows.iter().take(2) {
+                            let label = if row.account_name.is_empty() {
+                                row.app_name.clone()
+                            } else {
+                                format!("{} \u{00B7} {}", row.app_name, row.account_name)
+                            };
+                            ui.horizontal(|ui| {
+                                theme::pill(ui, row.type_str, p.txt2, p.raised2);
+                                ui.label(
+                                    egui::RichText::new(label)
+                                        .font(theme::f_reg(13.0))
+                                        .color(p.txt2),
+                                );
+                            });
+                            ui.add_space(4.0);
+                        }
+                        if total > 2 {
+                            ui.label(
+                                egui::RichText::new(format!("+{} more entries", total - 2))
+                                    .font(theme::f_reg(12.5))
+                                    .color(p.txt3),
+                            );
+                        }
+                    } else {
+                        ui.label(
+                            egui::RichText::new("Open On-device OTP to view stored entries.")
+                                .font(theme::f_reg(13.0))
+                                .color(p.txt3),
+                        );
+                    }
+                });
+            }
         });
     }
 
@@ -5059,12 +5738,18 @@ impl App {
                     ui.horizontal(|ui| {
                         theme::pill(ui, "PIN set", p.ok, p.ok_soft());
                         ui.add_space(8.0);
+                        // Mention fingerprints in the hint when the key supports
+                        // bio enrollment, so the user knows the Fingerprints
+                        // section appears only after unlocking.
+                        let hint = if self.bio_cmd_code().is_some() {
+                            "This key has a PIN. Unlock below to manage passkeys and fingerprints."
+                        } else {
+                            "This key has a PIN. Unlock below to manage passkeys."
+                        };
                         ui.label(
-                            egui::RichText::new(
-                                "This key has a PIN. Unlock below to manage passkeys.",
-                            )
-                            .font(theme::f_reg(13.0))
-                            .color(p.txt2),
+                            egui::RichText::new(hint)
+                                .font(theme::f_reg(13.0))
+                                .color(p.txt2),
                         );
                     });
                 }
@@ -5149,11 +5834,9 @@ impl App {
                         });
                         ui.add_space(4.0);
                         ui.label(
-                            egui::RichText::new(
-                                "4\u{2013}63 characters. You'll touch the key to confirm.",
-                            )
-                            .font(theme::f_reg(11.5))
-                            .color(p.txt3),
+                            egui::RichText::new("4\u{2013}63 characters.")
+                                .font(theme::f_reg(11.5))
+                                .color(p.txt3),
                         );
                     });
             }
@@ -5268,11 +5951,16 @@ impl App {
                         }
                     });
                 } else {
+                    let bio = self.bio_cmd_code().is_some();
                     ui.horizontal(|ui| {
                         let resp = ui.add(
                             egui::TextEdit::singleline(&mut self.security_keys.pin_input)
                                 .password(true)
-                                .hint_text("Enter PIN to view passkeys")
+                                .hint_text(if bio {
+                                    "Enter PIN to view passkeys & fingerprints"
+                                } else {
+                                    "Enter PIN to view passkeys"
+                                })
                                 .desired_width(220.0),
                         );
                         let submit = theme::button(ui, p, BtnKind::Primary, "Unlock").clicked();
@@ -5282,6 +5970,16 @@ impl App {
                             unlock = true;
                         }
                     });
+                    if bio {
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new(
+                                "Fingerprint management appears here after you unlock.",
+                            )
+                            .font(theme::f_reg(11.5))
+                            .color(p.txt3),
+                        );
+                    }
                 }
             });
             if lock {
@@ -5295,6 +5993,220 @@ impl App {
             }
             if let Some(id) = delete {
                 self.delete_credential(id);
+            }
+        }
+
+        // --- Fingerprint management (only when unlocked and the key supports it) ---
+        if self.security_keys.session.is_some() && self.bio_cmd_code().is_some() {
+            ui.add_space(14.0);
+            let mut do_enroll = false;
+            let mut do_refresh_fp = false;
+            let mut fp_delete: Option<Vec<u8>> = None;
+            let mut fp_rename_commit: Option<(Vec<u8>, String)> = None;
+            theme::card_frame(p).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Fingerprints")
+                            .font(theme::f_sb(14.5))
+                            .color(p.txt),
+                    );
+                    ui.add_space(6.0);
+                    self.help_dot(ui, p, "fingerprint");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if theme::button(ui, p, BtnKind::Default, "Reload").clicked() {
+                            do_refresh_fp = true;
+                        }
+                    });
+                });
+                ui.add_space(8.0);
+
+                // --- Enroll wizard: live per-sample progress while capturing ---
+                let enrolling = self.security_keys.fp_progress.is_some();
+                if let Some(prog) = self.security_keys.fp_progress.clone() {
+                    if let Ok(g) = prog.lock() {
+                        let (captured, total) = (g.captured, g.total.max(1));
+                        let frac = (captured as f32 / total as f32).clamp(0.0, 1.0);
+                        match &g.done {
+                            None => {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "Enrolling \u{2014} sample {} of {}",
+                                        captured.min(total),
+                                        total
+                                    ))
+                                    .font(theme::f_sb(13.0))
+                                    .color(p.accent),
+                                );
+                                ui.add(egui::ProgressBar::new(frac).desired_width(280.0));
+                                ui.add_space(4.0);
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "\u{1F446} {}",
+                                        g.last_message
+                                    ))
+                                    .font(theme::f_reg(12.0))
+                                    .color(p.txt2),
+                                );
+                            }
+                            Some(Ok(())) => {
+                                ui.label(
+                                    egui::RichText::new("\u{2713} Fingerprint enrolled")
+                                        .font(theme::f_sb(13.0))
+                                        .color(p.ok),
+                                );
+                                ui.add(egui::ProgressBar::new(1.0).desired_width(280.0));
+                            }
+                            Some(Err(e)) => {
+                                ui.colored_label(p.err, format!("Enrollment failed: {e}"));
+                            }
+                        }
+                    }
+                    ui.add_space(8.0);
+                    // Dismiss the wizard once the flow is finished.
+                    let finished = prog.lock().ok().and_then(|g| g.done.clone()).is_some();
+                    if finished && theme::button(ui, p, BtnKind::Default, "Done").clicked() {
+                        self.security_keys.fp_progress = None;
+                    }
+                }
+
+                // The list (None until first read). Hidden while the wizard runs.
+                if !enrolling {
+                    match &self.security_keys.fingerprints {
+                    None => {
+                        ui.label(
+                            egui::RichText::new("Click Reload to read enrolled fingerprints.")
+                                .font(theme::f_reg(13.0))
+                                .color(p.txt3),
+                        );
+                    }
+                    Some(list) if list.is_empty() => {
+                        ui.label(
+                            egui::RichText::new("No fingerprints enrolled yet.")
+                                .font(theme::f_reg(13.0))
+                                .color(p.txt3),
+                        );
+                    }
+                    Some(list) => {
+                        for e in list.iter() {
+                            let id = e.template_id.clone();
+                            ui.horizontal(|ui| {
+                                ui.monospace(hex_short(&id));
+                                // Inline rename editor for this row, or the name + buttons.
+                                let renaming = self
+                                    .security_keys
+                                    .fp_rename
+                                    .as_ref()
+                                    .is_some_and(|(rid, _)| rid == &id);
+                                if renaming {
+                                    if let Some((_, buf)) = self.security_keys.fp_rename.as_mut() {
+                                        ui.add(
+                                            egui::TextEdit::singleline(buf).desired_width(160.0),
+                                        );
+                                    }
+                                    if theme::button(ui, p, BtnKind::Primary, "Save").clicked() {
+                                        if let Some((rid, buf)) =
+                                            self.security_keys.fp_rename.take()
+                                        {
+                                            fp_rename_commit = Some((rid, buf));
+                                        }
+                                    }
+                                    if theme::button(ui, p, BtnKind::Ghost, "Cancel").clicked() {
+                                        self.security_keys.fp_rename = None;
+                                    }
+                                } else {
+                                    let name =
+                                        e.friendly_name.as_deref().unwrap_or("(unnamed)");
+                                    ui.label(name);
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if theme::button(ui, p, BtnKind::Ghost, "Delete")
+                                                .clicked()
+                                            {
+                                                self.security_keys.fp_confirm_delete =
+                                                    Some(id.clone());
+                                            }
+                                            if theme::button(ui, p, BtnKind::Ghost, "Rename")
+                                                .clicked()
+                                            {
+                                                self.security_keys.fp_rename = Some((
+                                                    id.clone(),
+                                                    e.friendly_name.clone().unwrap_or_default(),
+                                                ));
+                                            }
+                                        },
+                                    );
+                                }
+                            });
+                        }
+                    }
+                    }
+                }
+
+                ui.add_space(10.0);
+                // Enroll a new fingerprint (hidden while a wizard is running).
+                if !enrolling {
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.security_keys.fp_new_name)
+                                .hint_text("name (optional)")
+                                .desired_width(160.0),
+                        );
+                        if theme::button(ui, p, BtnKind::Primary, "Enroll new\u{2026}").clicked() {
+                            do_enroll = true;
+                        }
+                    });
+                    ui.label(
+                        egui::RichText::new(
+                            "Enrolling asks you to touch the sensor several times. \
+                             Keyboard-HID is not needed; this uses the FIDO interface.",
+                        )
+                        .font(theme::f_reg(11.0))
+                        .color(p.txt3),
+                    );
+                }
+
+                // --- Delete confirmation ("Are you sure?") ---
+                if let Some(id) = self.security_keys.fp_confirm_delete.clone() {
+                    ui.add_space(8.0);
+                    let label = self
+                        .security_keys
+                        .fingerprints
+                        .as_ref()
+                        .and_then(|l| l.iter().find(|e| e.template_id == id))
+                        .and_then(|e| e.friendly_name.clone())
+                        .unwrap_or_else(|| hex_short(&id));
+                    theme::card_frame(p)
+                        .stroke(egui::Stroke::new(1.0, theme::tint(p.err, 90)))
+                        .show(ui, |ui| {
+                            ui.colored_label(
+                                p.err,
+                                format!("Delete fingerprint \u{201c}{label}\u{201d}? This cannot be undone."),
+                            );
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                if theme::button(ui, p, BtnKind::Danger, "Delete").clicked() {
+                                    fp_delete = Some(id.clone());
+                                    self.security_keys.fp_confirm_delete = None;
+                                }
+                                if theme::button(ui, p, BtnKind::Default, "Cancel").clicked() {
+                                    self.security_keys.fp_confirm_delete = None;
+                                }
+                            });
+                        });
+                }
+            });
+            if do_refresh_fp {
+                self.refresh_fingerprints();
+            }
+            if do_enroll {
+                self.enroll_fingerprint();
+            }
+            if let Some(id) = fp_delete {
+                self.delete_fingerprint(id);
+            }
+            if let Some((id, name)) = fp_rename_commit {
+                self.rename_fingerprint(id, name);
             }
         }
 
@@ -5583,6 +6495,7 @@ impl App {
         }
 
         // --- Status ---
+        let slot_keys = &self.piv.slot_keys;
         if let Some(st) = &self.piv.status {
             theme::card_frame(p).show(ui, |ui| {
                 kv(
@@ -5603,17 +6516,54 @@ impl App {
                         .map_or("\u{2014}".to_string(), |n| n.to_string()),
                 );
                 ui.add_space(6.0);
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing.x = 5.0;
-                    for slot in &st.slots {
-                        let lab = format!(
-                            "{:02X} \u{00B7} {}",
-                            slot.slot.key_ref(),
-                            if slot.cert_present { "cert" } else { "empty" }
+                // One row per slot: name, a state pill (cert / key only /
+                // empty), and the key algorithm when GET METADATA reports it.
+                // `slot_keys` and `st.slots` are both in canonical slot order,
+                // so the algorithm is looked up by matching the slot.
+                for slot in &st.slots {
+                    let entry = slot_keys.iter().find(|(s, _, _)| *s == slot.slot);
+                    let alg = entry.and_then(|(_, a, _)| *a);
+                    let subject = entry.and_then(|(_, _, d)| d.as_deref());
+                    let (state, tint) = if slot.cert_present {
+                        ("cert", p.txt2)
+                    } else if alg.is_some() {
+                        ("key, no cert", p.txt2)
+                    } else {
+                        ("empty", p.txt3)
+                    };
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 5.0;
+                        ui.label(
+                            egui::RichText::new(slot.slot.label())
+                                .font(theme::f_reg(12.5))
+                                .color(p.txt2),
                         );
-                        theme::pill(ui, &lab, p.txt2, p.raised2);
+                        theme::pill(ui, state, tint, p.raised2);
+                        if let Some(a) = alg {
+                            theme::pill(ui, a.label(), p.txt2, p.raised2);
+                        }
+                    });
+                    // Subject DN under the row when a certificate carried one.
+                    // Truncate hard so a very long DN can't blow out the card.
+                    if let Some(dn) = subject {
+                        let shown = if dn.chars().count() > 64 {
+                            let mut s: String = dn.chars().take(63).collect();
+                            s.push('\u{2026}');
+                            s
+                        } else {
+                            dn.to_string()
+                        };
+                        ui.horizontal(|ui| {
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new(shown)
+                                    .font(theme::f_reg(11.5))
+                                    .color(p.txt3),
+                            )
+                            .on_hover_text(dn);
+                        });
                     }
-                });
+                }
             });
         } else if self.piv.error.is_none() {
             ui.label(
@@ -5668,6 +6618,8 @@ impl App {
                 sub(ui, "Change PIN");
                 pin_field(ui, p, "Current PIN", &mut self.piv.pin_old);
                 pin_field(ui, p, "New PIN", &mut self.piv.pin_new);
+                pin_field(ui, p, "Confirm new PIN", &mut self.piv.pin_confirm);
+                note(ui, "6\u{2013}8 characters.");
                 if theme::button(ui, p, BtnKind::Default, "Change PIN").clicked() {
                     go_change_pin = true;
                 }
@@ -5675,6 +6627,8 @@ impl App {
                 sub(ui, "Change PUK");
                 pin_field(ui, p, "Current PUK", &mut self.piv.puk_old);
                 pin_field(ui, p, "New PUK", &mut self.piv.puk_new);
+                pin_field(ui, p, "Confirm new PUK", &mut self.piv.puk_confirm);
+                note(ui, "8 characters.");
                 if theme::button(ui, p, BtnKind::Default, "Change PUK").clicked() {
                     go_change_puk = true;
                 }
@@ -5685,6 +6639,16 @@ impl App {
                 pin_field(ui, p, "New PIN", &mut self.piv.unblock_new_pin);
                 if theme::button(ui, p, BtnKind::Default, "Unblock PIN").clicked() {
                     go_unblock = true;
+                }
+                // Echo the last write result here too, so feedback for a PIN/PUK
+                // change lands next to the buttons (the top-of-pane banner stays
+                // for ops in other sections).
+                if let Some(err) = &self.piv.error {
+                    ui.add_space(6.0);
+                    ui.colored_label(p.err, err);
+                } else if let Some(n) = &self.piv.notice {
+                    ui.add_space(6.0);
+                    ui.colored_label(p.ok, n);
                 }
             });
         });
@@ -5939,7 +6903,7 @@ impl App {
 
     /// The Molto2 token's dedicated amber view: hero band · customer-key strip ·
     /// 100-slot rail + editor.
-    fn molto_view(&mut self, ui: &mut egui::Ui, p: &Palette, dev: &UiDevice) {
+    fn molto_view(&mut self, ui: &mut egui::Ui, p: &Palette, dev: &Device) {
         // Make brand-orange the accent throughout the Molto2 view, so its help
         // dots, links, selection highlights and primary action are all one
         // orange rather than mixing the app's blue accent into the token's
