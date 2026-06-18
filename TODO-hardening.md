@@ -120,6 +120,19 @@ anyone with the Linux build prerequisites from the README.
 
 ## v0.6.0 — CLI maturity & device-centric model (branch: `v0.6.0-cli-maturity`)
 
+> **STATUS (2026-06-17): Phases 1-4 DONE and pushed.** P1 shared device model
+> (`keyroost-resolve`), P2 bare overview + `list` correlated summary, P3 the
+> breaking nested command tree (`molto`/`fido` groups + tidy renames, `--name`
+> everywhere, per-group man pages, docs swept), P4 = Token2 **PR #30** folded in
+> (fingerprint enroll `fido fingerprint-*`, FIDO MDS, on-device OTP — Token2
+> authorship preserved) + `openpgp change-pin/change-admin-pin/unblock-pin` +
+> global `--json` (13 query commands) + `token2_pid_label` on `list`. **NEXT =
+> Phase 5** (hardware walkthrough / bug sweep on the new surface; devices on hand:
+> YubiKey 5.7, Solo 2, Molto2 — no Token2 PIN+ bio key). **Then Phase 6** = bump
+> workspace `0.5.1`→`0.6.0`, CHANGELOG `[Unreleased]`→`[0.6.0]`, final docs gaps.
+> Deferred: Token2 PIN+ OATH/OpenPGP/PIV (standards applets) untested-by-us →
+> experimental.
+
 Holistic pass over `keyroostctl` (and the shared plumbing the GUI uses):
 confirm the workflows make sense, dedup, fix the device-identification root
 cause, and add the friendly device overview. **Breaking CLI changes** — done
