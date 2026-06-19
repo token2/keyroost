@@ -581,8 +581,9 @@ configured (see `packaging/README.md`):
       that stays visible regardless of scroll, auto-clears after each op, and
       shows the result inline. App-wide pattern (PIV/FIDO/OpenPGP/OATH) — subsumes
       #36 and #31's message-placement point. (M)
-- [ ] **Bordered text inputs** — give text fields a visible border so they don't
-      blend into the dark theme (raised by @token2 in #33; applies app-wide). (S)
+- [x] **Bordered text inputs** — visible border on text fields so they don't
+      blend into the dark theme — **landed via #38** (the `theme.rs` change),
+      app-wide.
 
 #### Candidate GUI items — from @My1's reviews (#31 + the #38 thread); NOT yet scoped
 Captured so they're not lost; designs explored but not locked. Polish-first order.
