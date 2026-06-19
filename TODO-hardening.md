@@ -647,18 +647,18 @@ their detailed design follows #38 landing.
       LargeBlob write→read round-trip, the `always-uv` config write, and
       capability-gating (Settings/Storage correctly hidden on a Solo 2 that
       lacks `authnrCfg`/`largeBlobs`).
-- [ ] **LargeBlob CLI parity** — add a `fido large-blob` group (list / get /
-      dump + add / delete notes + **clear-all**, with `--json`) so LargeBlob
-      isn't the lone GUI-only capability. The byte layer
-      (`keyroost-ctap::large_blobs`) already exists; this is wiring on top. Warn
-      on writes — the array is world-readable (not a secret vault). (S)
+- [x] **LargeBlob CLI parity** — DONE (`47f94b5`): `fido large-blob`
+      list/get/add/edit/delete/clear with `--json`, re-read-before-write safety,
+      `--yes` + opaque-entry warnings on delete/clear, world-readable help note.
+      Reviewed (write-safety + destructive guards verified). Hardware test pending.
 - [ ] **LargeBlob survives `authenticatorReset` (privacy gap).** Confirmed on a
       YubiKey 5.7 (2026-06-19): a FIDO reset wipes credentials/PIN but **not**
       the large-blob array — so the plaintext notes the Token2 feature lets you
       store persist after a "reset." keyroost issues the standard reset (correct;
-      largeBlob-on-reset is vendor-specific), but we should (a) add a **"clear
-      large-blob storage"** action (write an empty array) and (b) note in the
-      reset confirmation that reset does not wipe large-blob storage. (S)
+      largeBlob-on-reset is vendor-specific). (a) clear-large-blob now exists in
+      the CLI (`fido large-blob clear`, `47f94b5`); REMAINING: (b) a GUI "clear
+      storage" action + (c) a note in the GUI reset confirmation that reset does
+      not wipe large-blob storage. (S)
 - [~] **Hardware-verify the config WRITE ops** — `always-uv` (reversible)
       verified on a YubiKey 5.7 (2026-06-19). Remaining (optional, low priority,
       one-way): `set-min-pin` + `enterprise-attestation` — exercise with a
@@ -669,7 +669,9 @@ their detailed design follows #38 landing.
       constant (docs/PROTOCOL.md) — the `keyroostctl probe` work item.
 
 ### I. Docs — README protocols/standards section (issue #41)
-- [~] Expand the README's protocols/standards section to enumerate the published
+- [x] DONE (`e278f8c`): added a "Standards & protocols" README section (verified
+      against the code) incl. the Token2 OTP SDK protocol link (#41 ask).
+- [x] (orig) Expand the README's protocols/standards section to enumerate the published
       specs keyroost implements — at minimum the **vendor-specific** ones (Token2
       Molto2 protocol [already cited] + Token2 **On-Device OTP SDK protocol**,
       the #41 ask: https://github.com/token2/token2-otp-cli/blob/main/docs/Token2-OTP-SDK-Protocol.md),
