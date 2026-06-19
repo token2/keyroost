@@ -301,6 +301,35 @@ impl PivSession {
         ok_or_write("piv import certificate", sw)
     }
 
+    /// Clear `slot`'s certificate object (standard PIV; universal across
+    /// firmware). Removes only the X.509 certificate; the slot's private key
+    /// persists. Requires prior management-key auth ([`authenticate_management`]).
+    ///
+    /// [`authenticate_management`]: PivSession::authenticate_management
+    pub fn clear_certificate(&mut self, slot: Slot) -> Result<(), TransportError> {
+        let (_, sw) = self.transmit_full(&piv::clear_certificate(slot))?;
+        ok_or_write("piv clear certificate", sw)
+    }
+
+    /// Delete `slot`'s private key (Yubico MOVE-to-`0xFF` extension). Permanently
+    /// erases the key material; the certificate object is untouched. Requires
+    /// YubiKey firmware 5.7+ **and** prior management-key auth
+    /// ([`authenticate_management`]). Cards older than 5.7 cannot delete a key —
+    /// the only recovery there is to overwrite the slot.
+    ///
+    /// [`authenticate_management`]: PivSession::authenticate_management
+    pub fn delete_key(&mut self, slot: Slot) -> Result<(), TransportError> {
+        // Version-gate: MOVE/DELETE KEY landed in YubiKey firmware 5.7.
+        let new_enough = matches!(self.version(), Some(v) if v >= (5, 7, 0));
+        if !new_enough {
+            return Err(TransportError::PivFirmwareTooOld(
+                "deleting a key requires YubiKey firmware 5.7 or newer (older cards can only overwrite the slot)",
+            ));
+        }
+        let (_, sw) = self.transmit_full(&piv::delete_key(slot))?;
+        ok_or_write("piv delete key", sw)
+    }
+
     /// Read the DER-encoded certificate stored in `slot`, or `None` when the
     /// slot is empty. No PIN required (PIV certificates are public objects).
     pub fn read_certificate(&mut self, slot: Slot) -> Result<Option<Vec<u8>>, TransportError> {

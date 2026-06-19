@@ -682,6 +682,37 @@ enum PivCmd {
         #[arg(long)]
         yes: bool,
     },
+    /// Clear a slot's certificate object (standard PIV; works on every card).
+    /// Removes ONLY the X.509 certificate — the slot's private key is left in
+    /// place. Needs the management key. DESTRUCTIVE: requires `--yes`.
+    DeleteCert {
+        #[arg(long, value_name = "SUBSTR")]
+        reader: Option<String>,
+        #[arg(long, value_enum)]
+        slot: CliPivSlot,
+        #[arg(long, value_name = "VAR", conflicts_with = "mgmt_key_stdin")]
+        mgmt_key_env: Option<String>,
+        #[arg(long)]
+        mgmt_key_stdin: bool,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Delete a slot's private key (Yubico extension; needs YubiKey firmware
+    /// 5.7 or newer). Permanently erases the key material — the certificate
+    /// object is left in place. Needs the management key. DESTRUCTIVE: requires
+    /// `--yes`. Older cards cannot delete a key; overwrite the slot instead.
+    DeleteKey {
+        #[arg(long, value_name = "SUBSTR")]
+        reader: Option<String>,
+        #[arg(long, value_enum)]
+        slot: CliPivSlot,
+        #[arg(long, value_name = "VAR", conflicts_with = "mgmt_key_stdin")]
+        mgmt_key_env: Option<String>,
+        #[arg(long)]
+        mgmt_key_stdin: bool,
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 /// Subcommands for the OpenPGP card applet.
@@ -4160,6 +4191,54 @@ fn run_piv(cmd: &PivCmd, debug: bool) -> Result<(), Box<dyn std::error::Error>> 
             }
             s.reset()?;
             println!("PIV application reset to factory defaults on {}.", serial);
+        }
+
+        PivCmd::DeleteCert {
+            reader,
+            slot,
+            mgmt_key_env,
+            mgmt_key_stdin,
+            yes,
+        } => {
+            if !yes {
+                return Err(format!(
+                    "refusing to clear the certificate in {} without --yes \
+                     (this is irreversible; the slot's private key is left in place)",
+                    slot.to_slot().label()
+                )
+                .into());
+            }
+            let mgmt = read_mgmt_key("management key", mgmt_key_env.as_deref(), *mgmt_key_stdin)?;
+            let mut s = open_piv_authed(reader.as_deref(), debug, &mgmt)?;
+            s.clear_certificate(slot.to_slot())?;
+            println!(
+                "Cleared the certificate in {} (the private key remains).",
+                slot.to_slot().label()
+            );
+        }
+
+        PivCmd::DeleteKey {
+            reader,
+            slot,
+            mgmt_key_env,
+            mgmt_key_stdin,
+            yes,
+        } => {
+            if !yes {
+                return Err(format!(
+                    "refusing to delete the private key in {} without --yes \
+                     (this is irreversible; the key material cannot be recovered)",
+                    slot.to_slot().label()
+                )
+                .into());
+            }
+            let mgmt = read_mgmt_key("management key", mgmt_key_env.as_deref(), *mgmt_key_stdin)?;
+            let mut s = open_piv_authed(reader.as_deref(), debug, &mgmt)?;
+            s.delete_key(slot.to_slot())?;
+            println!(
+                "Deleted the private key in {} (the certificate object, if any, remains).",
+                slot.to_slot().label()
+            );
         }
     }
     Ok(())

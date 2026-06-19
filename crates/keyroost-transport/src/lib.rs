@@ -102,6 +102,9 @@ pub enum TransportError {
     /// PIV reset refused by the card: the PIN and PUK must both be blocked
     /// before the applet allows a factory reset (`SW 6983`).
     PivResetNotAllowed,
+    /// A PIV operation needs a newer firmware than the card reports. Carries the
+    /// human-readable operation that was attempted.
+    PivFirmwareTooOld(&'static str),
     /// The host operating system's random-number source failed; a security
     /// handshake that needs an unpredictable challenge was aborted.
     HostRngFailed,
@@ -196,6 +199,9 @@ impl fmt::Display for TransportError {
                     f,
                     "PIV reset refused: the PIN and PUK must both be blocked first"
                 )
+            }
+            TransportError::PivFirmwareTooOld(op) => {
+                write!(f, "{}", op)
             }
             TransportError::HostRngFailed => {
                 write!(f, "the host OS random-number source failed")

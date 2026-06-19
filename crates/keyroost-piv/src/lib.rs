@@ -81,6 +81,8 @@ pub enum Instruction {
     GetSerial = 0xF8,
     /// Yubico extension: GET METADATA (key/PIN algorithm, policy, retries; fw 5.3+).
     GetMetadata = 0xF7,
+    /// Yubico extension: MOVE KEY (also DELETE KEY via the `0xFF` sentinel; fw 5.7+).
+    MoveKey = 0xF6,
     /// Yubico extension: SET MANAGEMENT KEY (9B).
     SetManagementKey = 0xFF,
     /// Yubico extension: SET PIN RETRIES (PIN + PUK try counts).
@@ -752,6 +754,25 @@ pub fn reset() -> Vec<u8> {
     vec![0x00, Instruction::Reset.code(), 0x00, 0x00]
 }
 
+/// Yubico extension: DELETE a slot's private key by issuing MOVE KEY with the
+/// `0xFF` destination sentinel (P1 = destination = `0xFF`, P2 = source slot
+/// reference). This permanently erases the key material in `slot`; the slot's
+/// certificate object is untouched. Requires firmware 5.7+ and prior
+/// management-key authentication. There is no standard-PIV equivalent.
+#[must_use]
+pub fn delete_key(slot: Slot) -> Vec<u8> {
+    vec![0x00, Instruction::MoveKey.code(), 0xFF, slot.key_ref()]
+}
+
+/// Clear a slot's certificate object by writing an empty PUT DATA template
+/// (`53 00`). Standard PIV and universal across firmware. This removes only the
+/// X.509 certificate from `slot`; the slot's private key persists. Requires
+/// prior management-key authentication.
+#[must_use]
+pub fn clear_certificate(slot: Slot) -> Vec<u8> {
+    put_data(&slot.cert_object_tag(), &[])
+}
+
 /// Pad a PIN to the fixed 8-byte PIV field with trailing `0xFF`. A PIN already
 /// 8 bytes or longer is returned truncated to 8 (PIV PINs are 6–8 bytes).
 fn pad_pin(pin: &[u8]) -> Vec<u8> {
@@ -1119,6 +1140,45 @@ mod tests {
         assert_eq!(set_pin_retries(5, 3), vec![0x00, 0xFA, 0x05, 0x03]);
         assert_eq!(reset(), vec![0x00, 0xFB, 0x00, 0x00]);
         assert_eq!(get_metadata(0x9B), vec![0x00, 0xF7, 0x00, 0x9B]);
+    }
+
+    #[test]
+    fn delete_key_kat_all_slots() {
+        // 00 F6 FF <slot_ref> — MOVE KEY with the 0xFF delete sentinel.
+        assert_eq!(delete_key(Slot::Signature), vec![0x00, 0xF6, 0xFF, 0x9C]);
+        assert_eq!(
+            delete_key(Slot::Authentication),
+            vec![0x00, 0xF6, 0xFF, 0x9A]
+        );
+        assert_eq!(
+            delete_key(Slot::KeyManagement),
+            vec![0x00, 0xF6, 0xFF, 0x9D]
+        );
+        assert_eq!(
+            delete_key(Slot::CardAuthentication),
+            vec![0x00, 0xF6, 0xFF, 0x9E]
+        );
+    }
+
+    #[test]
+    fn clear_certificate_kat_all_slots() {
+        // 00 DB 3F FF 07 5C 03 5F C1 0x 53 00 — empty PUT DATA template.
+        assert_eq!(
+            clear_certificate(Slot::Authentication),
+            vec![0x00, 0xDB, 0x3F, 0xFF, 0x07, 0x5C, 0x03, 0x5F, 0xC1, 0x05, 0x53, 0x00]
+        );
+        assert_eq!(
+            clear_certificate(Slot::Signature),
+            vec![0x00, 0xDB, 0x3F, 0xFF, 0x07, 0x5C, 0x03, 0x5F, 0xC1, 0x0A, 0x53, 0x00]
+        );
+        assert_eq!(
+            clear_certificate(Slot::KeyManagement),
+            vec![0x00, 0xDB, 0x3F, 0xFF, 0x07, 0x5C, 0x03, 0x5F, 0xC1, 0x0B, 0x53, 0x00]
+        );
+        assert_eq!(
+            clear_certificate(Slot::CardAuthentication),
+            vec![0x00, 0xDB, 0x3F, 0xFF, 0x07, 0x5C, 0x03, 0x5F, 0xC1, 0x01, 0x53, 0x00]
+        );
     }
 
     #[test]
