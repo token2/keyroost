@@ -406,6 +406,57 @@ impl OpenPgpSlotSel {
     }
 }
 
+/// Which credential-entry flow the PIV modal is currently driving. Maps 1:1 to
+/// the three PIN/PUK operations (`piv_change_pin` / `piv_change_puk` /
+/// `piv_unblock_pin`) and selects which secret fields the modal renders.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PivCredKind {
+    ChangePin,
+    ChangePuk,
+    UnblockPin,
+}
+
+impl PivCredKind {
+    /// Modal title, matching the FIDO dialogs' title style.
+    fn title(self) -> &'static str {
+        match self {
+            PivCredKind::ChangePin => "Change PIN",
+            PivCredKind::ChangePuk => "Change PUK",
+            PivCredKind::UnblockPin => "Unblock PIN",
+        }
+    }
+    /// Spinner caption shown while this flow's op runs (matches the busy label
+    /// the underlying `spawn_job` op uses).
+    fn busy_label(self) -> &'static str {
+        match self {
+            PivCredKind::ChangePin => "Changing PIV PIN\u{2026}",
+            PivCredKind::ChangePuk => "Changing PUK\u{2026}",
+            PivCredKind::UnblockPin => "Unblocking PIN\u{2026}",
+        }
+    }
+}
+
+/// Live state of the PIV credential-entry modal. Open iff `PivState::cred_modal`
+/// is `Some`. Tracks the flow, whether its op is in flight, and the op's result
+/// so the outcome is shown *in the modal* (issue #31 — feedback must not scroll
+/// off-screen). `result` is `None` until the op completes, then `Ok(())` on
+/// success or `Err(message)` on failure.
+struct PivCredModal {
+    kind: PivCredKind,
+    busy: bool,
+    result: Option<Result<(), String>>,
+}
+
+impl PivCredModal {
+    fn new(kind: PivCredKind) -> Self {
+        PivCredModal {
+            kind,
+            busy: false,
+            result: None,
+        }
+    }
+}
+
 /// State for the PIV pane: a status snapshot plus the entry fields for the full
 /// management surface (PIN/PUK, management key, key generation, certificate
 /// import/export, reset), keyed by the selected device's reader name.
@@ -469,6 +520,10 @@ struct PivState {
     csr_path: String,
     /// Reset confirmation modal: typed-`reset` text (modal open iff `Some`).
     confirm_reset: Option<String>,
+    /// Credential-entry modal for PIN/PUK changes + unblock (open iff `Some`).
+    /// The PIN/PUK secret fields above render *inside* this modal, not inline in
+    /// the pane, so the entry and its result stay on-screen (issue #31).
+    cred_modal: Option<PivCredModal>,
 }
 
 // The pane is replaced wholesale on device switch (`self.piv =
@@ -526,6 +581,7 @@ impl Default for PivState {
             sign_pin: String::new(),
             csr_path: String::new(),
             confirm_reset: None,
+            cred_modal: None,
         }
     }
 }
@@ -3766,7 +3822,23 @@ impl App {
         }
     }
 
-    /// Decode the management-key hex field, surfacing a parse error in the pane.
+    /// Mirror a PIV PIN/PUK write result into the credential modal so the outcome
+    /// is shown in-modal (issue #31). Reads the pane status `apply_piv_write` just
+    /// set: success clears `busy` and records `Ok(())`; an error records the
+    /// message and keeps the modal open for a retry. Cleared secrets on success
+    /// are wiped by the op's apply closure regardless.
+    fn apply_piv_cred_result(app: &mut App) {
+        if let Some(m) = app.piv.cred_modal.as_mut() {
+            m.busy = false;
+            m.result = match &app.piv.error {
+                Some(e) => Some(Err(e.clone())),
+                None => Some(Ok(())),
+            };
+        }
+    }
+
+    /// Change the PIV PIN. Validates new==confirm, runs off-thread, and surfaces
+    /// the outcome both in the pane banner and in the credential modal.
     fn piv_change_pin(&mut self) {
         let Some(name) = self.selected_oath_reader() else {
             return;
@@ -3789,6 +3861,7 @@ impl App {
                 wipe(&mut app.piv.pin_new);
                 wipe(&mut app.piv.pin_confirm);
                 Self::apply_piv_write(app, result, "PIN changed.".into());
+                Self::apply_piv_cred_result(app);
             })
         });
     }
@@ -3815,6 +3888,7 @@ impl App {
                 wipe(&mut app.piv.puk_new);
                 wipe(&mut app.piv.puk_confirm);
                 Self::apply_piv_write(app, result, "PUK changed.".into());
+                Self::apply_piv_cred_result(app);
             })
         });
     }
@@ -3838,6 +3912,7 @@ impl App {
                 wipe(&mut app.piv.unblock_puk);
                 wipe(&mut app.piv.unblock_new_pin);
                 Self::apply_piv_write(app, result, "PIN unblocked and reset.".into());
+                Self::apply_piv_cred_result(app);
             })
         });
     }
@@ -4355,6 +4430,41 @@ fn cap_tab_label(t: CapTab) -> &'static str {
 }
 
 /// A labelled password field row for the inline PIN form.
+/// New==confirm guard for the PIV credential modal. Returns the inline error
+/// message when the new secret and its confirmation differ, or `None` when they
+/// match (or the flow has no confirm field, i.e. `UnblockPin`). Empty fields are
+/// treated as "not yet a mismatch" so the error doesn't flash before the user
+/// finishes typing.
+fn piv_cred_mismatch(piv: &PivState, kind: PivCredKind) -> Option<&'static str> {
+    let (new, confirm, msg) = match kind {
+        PivCredKind::ChangePin => (
+            &piv.pin_new,
+            &piv.pin_confirm,
+            "the two new PINs don't match",
+        ),
+        PivCredKind::ChangePuk => (
+            &piv.puk_new,
+            &piv.puk_confirm,
+            "the two new PUKs don't match",
+        ),
+        PivCredKind::UnblockPin => return None,
+    };
+    if confirm.is_empty() || new == confirm {
+        None
+    } else {
+        Some(msg)
+    }
+}
+
+/// In-modal success confirmation text for each PIV credential flow.
+fn piv_cred_success(kind: PivCredKind) -> &'static str {
+    match kind {
+        PivCredKind::ChangePin => "PIN changed",
+        PivCredKind::ChangePuk => "PUK changed",
+        PivCredKind::UnblockPin => "PIN unblocked and reset",
+    }
+}
+
 fn pin_field(ui: &mut egui::Ui, p: &Palette, label: &str, buf: &mut String) {
     ui.horizontal(|ui| {
         ui.add_sized(
@@ -4961,6 +5071,7 @@ impl eframe::App for App {
         self.render_oath_delete_confirm(ctx);
         self.render_openpgp_confirms(ctx);
         self.render_piv_confirms(ctx);
+        self.render_piv_cred_modal(ctx, &p);
         self.molto_dialogs(ctx, &p);
 
         // Help popover, painted last so it sits above everything.
@@ -7690,6 +7801,144 @@ impl App {
         }
     }
 
+    /// PIV credential-entry modal: drives Change PIN / Change PUK / Unblock PIN
+    /// inside the shared `modal_window` chrome, so the secret fields *and* the
+    /// op's result stay centered on-screen rather than scrolling off (issue #31).
+    ///
+    /// The fields live in `PivState` (rendered here, not inline in the pane); the
+    /// modal state (`PivState::cred_modal`) tracks the flow, an in-flight flag,
+    /// and the op result. On Submit it validates new==confirm, then runs the
+    /// existing op (`piv_change_pin` / `piv_change_puk` / `piv_unblock_pin`),
+    /// which writes the outcome back into the modal via `apply_piv_cred_result`.
+    /// Cancel / ✕ / Esc — and a successful Done — wipe the secret fields.
+    fn render_piv_cred_modal(&mut self, ctx: &egui::Context, p: &Palette) {
+        let Some(kind) = self.piv.cred_modal.as_ref().map(|m| m.kind) else {
+            return;
+        };
+        let busy = self.piv.cred_modal.as_ref().is_some_and(|m| m.busy);
+        let result = self.piv.cred_modal.as_ref().and_then(|m| m.result.clone());
+
+        let mut want_submit = false;
+        let mut want_close = false;
+        // Inline new==confirm guard, mirroring the op-level backstop. Shown as
+        // the modal's error line; blocks Submit when set.
+        let mismatch = piv_cred_mismatch(&self.piv, kind);
+
+        let closed = Self::modal_window(ctx, p, "piv_cred", kind.title(), |ui| {
+            match &result {
+                Some(Ok(())) => {
+                    // Success: confirmation + a single Done that dismisses.
+                    ui.label(
+                        egui::RichText::new(format!("\u{2713} {}", piv_cred_success(kind)))
+                            .font(theme::f_sb(13.0))
+                            .color(p.ok),
+                    );
+                    ui.add_space(16.0);
+                    if theme::button(ui, p, BtnKind::Primary, "Done").clicked() {
+                        want_close = true;
+                    }
+                }
+                _ => {
+                    // Entry form (also the path while busy / after an error so the
+                    // user can retry without losing the dialog).
+                    match kind {
+                        PivCredKind::ChangePin => {
+                            pin_field(ui, p, "Current PIN", &mut self.piv.pin_old);
+                            pin_field(ui, p, "New PIN", &mut self.piv.pin_new);
+                            pin_field(ui, p, "Confirm new PIN", &mut self.piv.pin_confirm);
+                            card_note(ui, p, "6\u{2013}8 characters.");
+                        }
+                        PivCredKind::ChangePuk => {
+                            pin_field(ui, p, "Current PUK", &mut self.piv.puk_old);
+                            pin_field(ui, p, "New PUK", &mut self.piv.puk_new);
+                            pin_field(ui, p, "Confirm new PUK", &mut self.piv.puk_confirm);
+                            card_note(ui, p, "8 characters.");
+                        }
+                        PivCredKind::UnblockPin => {
+                            pin_field(ui, p, "PUK", &mut self.piv.unblock_puk);
+                            pin_field(ui, p, "New PIN", &mut self.piv.unblock_new_pin);
+                            card_note(ui, p, "Recovers a blocked PIN without wiping any keys.");
+                        }
+                    }
+
+                    // Inline error/result line: the new==confirm mismatch, then
+                    // the op's error (kept open for a retry).
+                    if let Some(msg) = mismatch {
+                        ui.add_space(6.0);
+                        ui.colored_label(p.err, msg);
+                    } else if let Some(Err(e)) = &result {
+                        ui.add_space(6.0);
+                        ui.colored_label(p.err, e);
+                    }
+
+                    ui.add_space(16.0);
+                    ui.horizontal(|ui| {
+                        if busy {
+                            ui.add(egui::Spinner::new());
+                            ui.label(
+                                egui::RichText::new(kind.busy_label())
+                                    .font(theme::f_reg(12.5))
+                                    .color(p.txt2),
+                            );
+                        } else {
+                            if theme::button(ui, p, BtnKind::Primary, kind.title()).clicked()
+                                && mismatch.is_none()
+                            {
+                                want_submit = true;
+                            }
+                            ui.add_space(8.0);
+                            if theme::button(ui, p, BtnKind::Default, "Cancel").clicked() {
+                                want_close = true;
+                            }
+                        }
+                    });
+                }
+            }
+        });
+
+        // ✕ / Esc dismiss too, but never yank the dialog out from under a
+        // running op (mirrors the enroll dialog's busy handling).
+        if (closed || want_close) && !busy {
+            self.piv_cred_modal_close();
+            return;
+        }
+        if want_submit && !busy {
+            // Mark busy first so the modal shows the spinner this frame; the op
+            // writes the result back via `apply_piv_cred_result`. If the worker
+            // is busy (spawn_job returns false implicitly), the op simply no-ops
+            // and the next click retries.
+            if let Some(m) = self.piv.cred_modal.as_mut() {
+                m.busy = true;
+                m.result = None;
+            }
+            match kind {
+                PivCredKind::ChangePin => self.piv_change_pin(),
+                PivCredKind::ChangePuk => self.piv_change_puk(),
+                PivCredKind::UnblockPin => self.piv_unblock_pin(),
+            }
+            // If the op didn't actually queue (worker busy), unstick the modal.
+            if !self.busy() {
+                if let Some(m) = self.piv.cred_modal.as_mut() {
+                    m.busy = false;
+                }
+            }
+        }
+    }
+
+    /// Close the PIV credential modal, wiping every PIN/PUK field it could have
+    /// touched (cheap to over-wipe; all are secrets).
+    fn piv_cred_modal_close(&mut self) {
+        wipe(&mut self.piv.pin_old);
+        wipe(&mut self.piv.pin_new);
+        wipe(&mut self.piv.pin_confirm);
+        wipe(&mut self.piv.puk_old);
+        wipe(&mut self.piv.puk_new);
+        wipe(&mut self.piv.puk_confirm);
+        wipe(&mut self.piv.unblock_puk);
+        wipe(&mut self.piv.unblock_new_pin);
+        self.piv.cred_modal = None;
+    }
+
     /// Authenticator / OATH tab — live codes with countdown rings + copy.
     fn cap_oath(&mut self, ui: &mut egui::Ui, p: &Palette) {
         // Auto-attempt a read once per selection (a hard error won't retry).
@@ -7898,9 +8147,9 @@ impl App {
         // Intents collected inside the UI closures and applied afterwards, so a
         // submit method's `&mut self` never overlaps a card's borrow.
         let mut do_refresh = false;
-        let mut go_change_pin = false;
-        let mut go_change_puk = false;
-        let mut go_unblock = false;
+        let mut open_change_pin = false;
+        let mut open_change_puk = false;
+        let mut open_unblock = false;
         let mut go_generate = false;
         let mut go_import = false;
         let mut go_export = false;
@@ -8060,41 +8309,28 @@ impl App {
         .id_salt("piv-pin-puk")
         .show(ui, |ui| {
             theme::card_frame(p).show(ui, |ui| {
-                sub(ui, "Change PIN");
-                pin_field(ui, p, "Current PIN", &mut self.piv.pin_old);
-                pin_field(ui, p, "New PIN", &mut self.piv.pin_new);
-                pin_field(ui, p, "Confirm new PIN", &mut self.piv.pin_confirm);
-                note(ui, "6\u{2013}8 characters.");
-                if theme::button(ui, p, BtnKind::Default, "Change PIN").clicked() {
-                    go_change_pin = true;
-                }
-                ui.add_space(10.0);
-                sub(ui, "Change PUK");
-                pin_field(ui, p, "Current PUK", &mut self.piv.puk_old);
-                pin_field(ui, p, "New PUK", &mut self.piv.puk_new);
-                pin_field(ui, p, "Confirm new PUK", &mut self.piv.puk_confirm);
-                note(ui, "8 characters.");
-                if theme::button(ui, p, BtnKind::Default, "Change PUK").clicked() {
-                    go_change_puk = true;
-                }
-                ui.add_space(10.0);
-                sub(ui, "Unblock PIN with PUK");
-                note(ui, "Recovers a blocked PIN without wiping any keys.");
-                pin_field(ui, p, "PUK", &mut self.piv.unblock_puk);
-                pin_field(ui, p, "New PIN", &mut self.piv.unblock_new_pin);
-                if theme::button(ui, p, BtnKind::Default, "Unblock PIN").clicked() {
-                    go_unblock = true;
-                }
-                // Echo the last write result here too, so feedback for a PIN/PUK
-                // change lands next to the buttons (the top-of-pane banner stays
-                // for ops in other sections).
-                if let Some(err) = &self.piv.error {
+                // The PIN/PUK secret entry lives in a centered modal now, so the
+                // fields and their result stay on-screen instead of scrolling off
+                // (issue #31). These buttons just open the corresponding flow.
+                note(
+                    ui,
+                    "Change the PIN, change the PUK, or recover a blocked PIN \
+                     with the PUK \u{2014} each opens a focused dialog.",
+                );
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if theme::button(ui, p, BtnKind::Default, "Change PIN\u{2026}").clicked() {
+                        open_change_pin = true;
+                    }
                     ui.add_space(6.0);
-                    ui.colored_label(p.err, err);
-                } else if let Some(n) = &self.piv.notice {
+                    if theme::button(ui, p, BtnKind::Default, "Change PUK\u{2026}").clicked() {
+                        open_change_puk = true;
+                    }
                     ui.add_space(6.0);
-                    ui.colored_label(p.ok, n);
-                }
+                    if theme::button(ui, p, BtnKind::Default, "Unblock PIN\u{2026}").clicked() {
+                        open_unblock = true;
+                    }
+                });
             });
         });
         ui.add_space(6.0);
@@ -8307,14 +8543,20 @@ impl App {
         if do_refresh {
             self.load_piv_status();
         }
-        if go_change_pin {
-            self.piv_change_pin();
+        // The three buttons open the centered credential modal; the modal itself
+        // (rendered once per frame) runs the actual op. Opening wipes any stale
+        // fields first so a fresh dialog starts blank.
+        if open_change_pin {
+            self.piv_cred_modal_close();
+            self.piv.cred_modal = Some(PivCredModal::new(PivCredKind::ChangePin));
         }
-        if go_change_puk {
-            self.piv_change_puk();
+        if open_change_puk {
+            self.piv_cred_modal_close();
+            self.piv.cred_modal = Some(PivCredModal::new(PivCredKind::ChangePuk));
         }
-        if go_unblock {
-            self.piv_unblock_pin();
+        if open_unblock {
+            self.piv_cred_modal_close();
+            self.piv.cred_modal = Some(PivCredModal::new(PivCredKind::UnblockPin));
         }
         if go_generate {
             self.piv_generate_key();
@@ -8987,5 +9229,96 @@ mod tests {
         app.spawn_job("inline", || Box::new(|app: &mut App| app.slot = 7));
         assert_eq!(app.slot, 7);
         assert!(!app.busy());
+    }
+
+    /// The PIV credential modal's new==confirm guard: matching (or still-empty)
+    /// confirm fields pass; a divergent confirm reports the right message.
+    #[test]
+    fn piv_cred_mismatch_change_pin() {
+        let mut piv = PivState::default();
+        // Empty confirm is treated as "not yet a mismatch".
+        piv.pin_new = "1234".into();
+        assert_eq!(piv_cred_mismatch(&piv, PivCredKind::ChangePin), None);
+        // Matching new/confirm: no error.
+        piv.pin_confirm = "1234".into();
+        assert_eq!(piv_cred_mismatch(&piv, PivCredKind::ChangePin), None);
+        // Divergent confirm: the PIN-specific message.
+        piv.pin_confirm = "9999".into();
+        assert_eq!(
+            piv_cred_mismatch(&piv, PivCredKind::ChangePin),
+            Some("the two new PINs don't match")
+        );
+    }
+
+    #[test]
+    fn piv_cred_mismatch_change_puk() {
+        let mut piv = PivState::default();
+        piv.puk_new = "12345678".into();
+        piv.puk_confirm = "00000000".into();
+        assert_eq!(
+            piv_cred_mismatch(&piv, PivCredKind::ChangePuk),
+            Some("the two new PUKs don't match")
+        );
+        piv.puk_confirm = "12345678".into();
+        assert_eq!(piv_cred_mismatch(&piv, PivCredKind::ChangePuk), None);
+    }
+
+    /// Unblock has no confirm field, so the guard never reports a mismatch even
+    /// with arbitrary field contents.
+    #[test]
+    fn piv_cred_mismatch_unblock_never_fires() {
+        let mut piv = PivState::default();
+        piv.unblock_puk = "12345678".into();
+        piv.unblock_new_pin = "1234".into();
+        assert_eq!(piv_cred_mismatch(&piv, PivCredKind::UnblockPin), None);
+    }
+
+    /// Each flow maps to its own title, busy caption, and success text.
+    #[test]
+    fn piv_cred_kind_strings_are_distinct() {
+        let kinds = [
+            PivCredKind::ChangePin,
+            PivCredKind::ChangePuk,
+            PivCredKind::UnblockPin,
+        ];
+        let titles: Vec<_> = kinds.iter().map(|k| k.title()).collect();
+        assert_eq!(titles, ["Change PIN", "Change PUK", "Unblock PIN"]);
+        assert_eq!(piv_cred_success(PivCredKind::ChangePin), "PIN changed");
+        assert_eq!(piv_cred_success(PivCredKind::ChangePuk), "PUK changed");
+        assert_eq!(
+            piv_cred_success(PivCredKind::UnblockPin),
+            "PIN unblocked and reset"
+        );
+        // Busy captions are non-empty and unique.
+        let busy: Vec<_> = kinds.iter().map(|k| k.busy_label()).collect();
+        assert!(busy.iter().all(|s| !s.is_empty()));
+        assert_eq!(busy[0], "Changing PIV PIN\u{2026}");
+    }
+
+    /// `apply_piv_cred_result` mirrors the pane outcome into the open modal:
+    /// no error → `Ok`, error present → `Err(message)`, and `busy` clears.
+    #[test]
+    fn apply_piv_cred_result_mirrors_outcome() {
+        let mut app = App::default();
+        // Success path.
+        app.piv.cred_modal = Some(PivCredModal {
+            kind: PivCredKind::ChangePin,
+            busy: true,
+            result: None,
+        });
+        app.piv.error = None;
+        App::apply_piv_cred_result(&mut app);
+        let m = app.piv.cred_modal.as_ref().unwrap();
+        assert!(!m.busy);
+        assert_eq!(m.result, Some(Ok(())));
+
+        // Error path.
+        app.piv.cred_modal = Some(PivCredModal::new(PivCredKind::ChangePuk));
+        app.piv.cred_modal.as_mut().unwrap().busy = true;
+        app.piv.error = Some("wrong PUK".into());
+        App::apply_piv_cred_result(&mut app);
+        let m = app.piv.cred_modal.as_ref().unwrap();
+        assert!(!m.busy);
+        assert_eq!(m.result, Some(Err("wrong PUK".into())));
     }
 }
