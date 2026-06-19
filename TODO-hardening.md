@@ -566,11 +566,16 @@ configured (see `packaging/README.md`):
 
 ### B. PIV GUI — issue #31 items 4–6 (items 1–3 shipped in 0.6.0)
 - [ ] Slot-first PIV view: pick a slot → see/act on its contents. (M)
-- [ ] In-GUI key/cert deletion — **DECIDED: Option B.** Clear the certificate
-      object (`PUT DATA` empty — universal, standard PIV) **and** add the
-      YubiKey 5.7 vendor key-delete extension (device-gated, like our other
-      Yubico ops). User has a YubiKey 5.7 to verify the key-delete path. Needs
-      the byte-layer work in `keyroost-piv` + transport first. (L)
+- [~] Key/cert deletion — **Option B.** BACKEND DONE (`952c8f4`): byte layer
+      (`delete_key` → `00 F6 FF <ref>`, `clear_certificate` = empty PUT DATA, KATs)
+      + transport (version-gated `delete_key` ≥5.7, `clear_certificate`) + CLI
+      (`piv delete-key` / `piv delete-cert`, `--yes`-guarded). **HARDWARE-VERIFIED
+      on YubiKey 5.7.4:** delete-key proven via reject-on-empty (SW 6A88) +
+      double-delete; delete-cert via status cert-present→empty. REMAINING: the
+      **GUI** delete actions (per-slot Delete cert / Delete key via the credential
+      modal, key-delete gated on 5.7 support). (L)
+      *Minor follow-up:* CLI `piv status` is cert-based — doesn't show a
+      key-without-cert; could add metadata-based key presence like the GUI. (S)
 - [ ] Native file-chooser dialogs for cert/key import — **DECIDED: adopt `rfd`**
       (enough demand to justify the platform-glue dep; fits the eframe-style
       carve-out). (M)
