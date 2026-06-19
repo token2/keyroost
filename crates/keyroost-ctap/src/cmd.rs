@@ -161,6 +161,8 @@ pub struct AuthenticatorInfo {
     pub max_credential_count_in_list: Option<u64>,
     pub max_credential_id_length: Option<u64>,
     pub transports: Vec<String>,
+    pub force_pin_change: Option<bool>,
+    pub min_pin_length: Option<u64>,
     pub firmware_version: Option<u64>,
 }
 
@@ -230,6 +232,8 @@ pub fn parse_authenticator_info(v: &Value) -> Result<AuthenticatorInfo, CtapErro
             0x07 => info.max_credential_count_in_list = val.as_uint(),
             0x08 => info.max_credential_id_length = val.as_uint(),
             0x09 => info.transports = collect_strings(val),
+            0x0C => info.force_pin_change = val.as_bool(),
+            0x0D => info.min_pin_length = val.as_uint(),
             0x0E => info.firmware_version = val.as_uint(),
             _ => {}
         }
@@ -295,6 +299,9 @@ mod tests {
             ),
             (Value::UInt(5), Value::UInt(1200)),
             (Value::UInt(6), Value::Array(vec![Value::UInt(1)])),
+            (Value::UInt(0x0C), Value::Bool(true)), // forcePINChange
+            (Value::UInt(0x0D), Value::UInt(6)),    // minPINLength
+            (Value::UInt(0x0E), Value::UInt(328706)), // firmwareVersion
         ]);
         let mut bytes = vec![0u8]; // status byte
         bytes.extend(encode(&v));

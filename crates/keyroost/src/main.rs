@@ -6122,6 +6122,86 @@ impl App {
             if unlock {
                 self.try_unlock();
             }
+
+            // Read-only "Security policy" summary. getInfo is unauthenticated,
+            // so the policy STATE is known without a PIN. Shown only on keys
+            // that support authenticatorConfig (the same gate as the Settings
+            // tab); the controls themselves still live in that tab post-unlock.
+            if supports_cfg {
+                let info = self.security_keys.info.as_ref();
+                let always_uv = info.and_then(|i| i.option("alwaysUv"));
+                let min_pin = info.and_then(|i| i.min_pin_length);
+                let force_change = info.and_then(|i| i.force_pin_change);
+                let ep = info.and_then(|i| i.option("ep"));
+
+                ui.add_space(14.0);
+                theme::card_frame(p).show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new("Security policy")
+                            .font(theme::f_sb(14.5))
+                            .color(p.txt),
+                    );
+                    ui.add_space(8.0);
+
+                    let row = |ui: &mut egui::Ui, label: &str, value: String| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(label)
+                                    .font(theme::f_reg(12.0))
+                                    .color(p.txt3),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        egui::RichText::new(value)
+                                            .font(theme::f_sb(12.0))
+                                            .color(p.txt),
+                                    );
+                                },
+                            );
+                        });
+                    };
+
+                    row(
+                        ui,
+                        "Always require user verification",
+                        match always_uv {
+                            Some(true) => "On".to_string(),
+                            Some(false) => "Off".to_string(),
+                            None => "\u{2014}".to_string(),
+                        },
+                    );
+                    ui.add_space(4.0);
+                    row(
+                        ui,
+                        "Minimum PIN length",
+                        match min_pin {
+                            Some(n) => n.to_string(),
+                            None => "\u{2014}".to_string(),
+                        },
+                    );
+                    if force_change == Some(true) {
+                        ui.add_space(4.0);
+                        row(ui, "Force PIN change", "Required on next use".to_string());
+                    }
+                    if let Some(ep) = ep {
+                        ui.add_space(4.0);
+                        row(
+                            ui,
+                            "Enterprise attestation",
+                            if ep { "Enabled" } else { "Supported" }.to_string(),
+                        );
+                    }
+
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new("Unlock to change these.")
+                            .font(theme::f_reg(11.5))
+                            .color(p.txt3),
+                    );
+                });
+            }
         }
 
         // Once unlocked, the sub-view tabs sit at the top of the content, each
@@ -7043,6 +7123,11 @@ impl App {
             .and_then(|i| i.option("ep"));
         let supports_ep = ep.is_some();
         let ep_enabled = ep == Some(true);
+        let min_pin_length = self
+            .security_keys
+            .info
+            .as_ref()
+            .and_then(|i| i.min_pin_length);
 
         ui.add_space(14.0);
         theme::card_frame(p).show(ui, |ui| {
@@ -7106,6 +7191,15 @@ impl App {
                     );
                     ui.label(
                         egui::RichText::new("Can only be raised, never lowered without a reset.")
+                            .font(theme::f_reg(11.5))
+                            .color(p.txt3),
+                    );
+                    let current = match min_pin_length {
+                        Some(n) => format!("Current minimum: {} characters", n),
+                        None => "Current minimum: \u{2014}".to_string(),
+                    };
+                    ui.label(
+                        egui::RichText::new(current)
                             .font(theme::f_reg(11.5))
                             .color(p.txt3),
                     );

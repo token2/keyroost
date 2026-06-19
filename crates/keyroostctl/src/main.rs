@@ -96,6 +96,10 @@ mod json_out {
         pub pin_uv_auth_protocols: Vec<u64>,
         pub transports: Vec<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        pub min_pin_length: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub force_pin_change: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         pub firmware_version: Option<u64>,
     }
 
@@ -4505,6 +4509,8 @@ fn run_fido_info(path: Option<&std::path::Path>) -> Result<(), Box<dyn std::erro
                 max_msg_size: info.max_msg_size,
                 pin_uv_auth_protocols: info.pin_uv_auth_protocols.clone(),
                 transports: info.transports.clone(),
+                min_pin_length: info.min_pin_length,
+                force_pin_change: info.force_pin_change,
                 firmware_version: info.firmware_version,
             }),
         })?;
@@ -4538,6 +4544,12 @@ fn run_fido_info(path: Option<&std::path::Path>) -> Result<(), Box<dyn std::erro
     }
     if !info.transports.is_empty() {
         println!("Transports: {}", info.transports.join(", "));
+    }
+    if let Some(n) = info.min_pin_length {
+        println!("Min PIN length: {}", n);
+    }
+    if info.force_pin_change == Some(true) {
+        println!("Force PIN change: yes");
     }
     if let Some(v) = info.firmware_version {
         println!("CTAP fwVer: {}", v);
@@ -5364,6 +5376,8 @@ mod cli_tests {
                 max_msg_size: Some(1200),
                 pin_uv_auth_protocols: vec![1, 2],
                 transports: vec!["usb".into()],
+                min_pin_length: Some(4),
+                force_pin_change: Some(false),
                 firmware_version: Some(328706),
             }),
         };
