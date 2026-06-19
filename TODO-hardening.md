@@ -668,6 +668,15 @@ their detailed design follows #38 landing.
 - [ ] Confirm the Molto2 `read_info` 3-byte preamble + 2-byte separator are
       constant (docs/PROTOCOL.md) — the `keyroostctl probe` work item.
 
+### I. Docs — README protocols/standards section (issue #41)
+- [~] Expand the README's protocols/standards section to enumerate the published
+      specs keyroost implements — at minimum the **vendor-specific** ones (Token2
+      Molto2 protocol [already cited] + Token2 **On-Device OTP SDK protocol**,
+      the #41 ask: https://github.com/token2/token2-otp-cli/blob/main/docs/Token2-OTP-SDK-Protocol.md),
+      plus the standards (FIDO CTAP 2.1, OATH HOTP/TOTP RFCs, OpenPGP Card 3.4,
+      NIST SP 800-73-4 PIV, SM4 GB/T 32907-2016, SHA-1 RFC 3174, base32/CBOR,
+      etc.). Dispatched to a background agent (2026-06-19).
+
 ### Post-release triage (ongoing, reserve room)
 - [ ] Watch for and triage issues from the v0.6.0 release as they arrive —
       regressions from the breaking command restructure, packaging/install
@@ -706,3 +715,14 @@ multi-agent review:
       use case is decommissioning / recycling a key between users (e.g. an
       employer reissuing a returned key) — confirm that's a real practice worth
       the footgun before building. (Ties in the large-blob-clear item above.)
+- [ ] **largeBlob SSH-certificate helper** — DEFERRED to a future release (NOT
+      v0.7.0; user likes it but it's out of scope for now). The one real,
+      vendor-emphasized use of the large-blob space (Yubico): store an SSH
+      certificate alongside a resident FIDO2 SSH credential (the `ssh:` app
+      binding, the `fido2-token`/`ssh-keygen` workflow), surfaced as readable
+      cert metadata. Bigger than the generic notes CLI: needs the per-credential
+      `largeBlobKey` via a getAssertion-with-extension flow + the CTAP large-blob
+      AEAD (DEFLATE + AES-256-GCM) — likely 1-2 new deps (`aes-gcm`, a deflate
+      crate), a dep-policy decision. Token2 frames their notes as a generic
+      "scratchpad, not for secrets" (no use case); Nitrokey's largeBlob support
+      is unreleased. Design separately when picked up.
