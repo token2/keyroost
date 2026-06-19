@@ -92,7 +92,10 @@ Beyond the maintainers, keyroost is grateful for community contributions:
   fingerprint/bio enrollment, FIDO Metadata Service (MDS) display, and a
   rounding-out of the on-device OTP support — all validated on real PIN+
   hardware ([#29](https://github.com/framefilter/keyroost/pull/29),
-  [#30](https://github.com/framefilter/keyroost/pull/30)).
+  [#30](https://github.com/framefilter/keyroost/pull/30)). Also added CTAP 2.1
+  authenticator-config (security policy) and large-blob storage management,
+  with a FIDO2 tab redesign
+  ([#38](https://github.com/framefilter/keyroost/pull/38)).
 
 (This credits their contribution to the codebase; it does not change keyroost's
 independent status described above.)

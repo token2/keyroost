@@ -117,7 +117,7 @@ impl<'a> Configurator<'a> {
         if force_change {
             entries.push((Value::UInt(PARAM_FORCE_CHANGE_PIN), Value::Bool(true)));
         }
-        let params = (!entries.is_empty()).then(|| Value::Map(entries));
+        let params = (!entries.is_empty()).then_some(Value::Map(entries));
         self.dispatch(SUB_SET_MIN_PIN_LENGTH, params)
     }
 
@@ -193,7 +193,10 @@ mod tests {
     #[test]
     fn auth_input_includes_params_cbor() {
         // setMinPINLength with newMinPINLength = 6: params follow the prefix.
-        let params = Value::Map(vec![(Value::UInt(PARAM_NEW_MIN_PIN_LENGTH), Value::UInt(6))]);
+        let params = Value::Map(vec![(
+            Value::UInt(PARAM_NEW_MIN_PIN_LENGTH),
+            Value::UInt(6),
+        )]);
         let input = config_auth_input(SUB_SET_MIN_PIN_LENGTH, Some(&params));
         assert!(input[..32].iter().all(|&b| b == 0xff));
         assert_eq!(input[32], CTAP2_CONFIG);
@@ -216,11 +219,17 @@ mod tests {
         let map = Value::Map(entries);
         let (decoded, _) = cbor::decode(&cbor::encode(&map)).unwrap();
         assert_eq!(
-            decoded.get_uint_key(PARAM_NEW_MIN_PIN_LENGTH).unwrap().as_uint(),
+            decoded
+                .get_uint_key(PARAM_NEW_MIN_PIN_LENGTH)
+                .unwrap()
+                .as_uint(),
             Some(8)
         );
         assert_eq!(
-            decoded.get_uint_key(PARAM_FORCE_CHANGE_PIN).unwrap().as_bool(),
+            decoded
+                .get_uint_key(PARAM_FORCE_CHANGE_PIN)
+                .unwrap()
+                .as_bool(),
             Some(true)
         );
     }

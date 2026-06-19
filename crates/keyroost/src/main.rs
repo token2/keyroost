@@ -686,13 +686,6 @@ fn main() -> eframe::Result<()> {
 struct App {
     /// Active PC/SC session, if any.
     session: Option<Session>,
-    /// Background watermark textures (light-ink for dark theme, dark-ink for
-    /// light). `Some(None)` = tried and absent. Branding-only.
-    wm_dark_theme: Option<Option<egui::TextureHandle>>,
-    wm_light_theme: Option<Option<egui::TextureHandle>>,
-    /// Scattered left-pane motif textures per theme.
-    motifs_dark_theme: Option<Vec<egui::TextureHandle>>,
-    motifs_light_theme: Option<Vec<egui::TextureHandle>>,
     /// Last device info read.
     info: Option<DeviceInfo>,
     /// Whether the session has been authenticated.
@@ -2096,18 +2089,14 @@ impl App {
         };
         self.spawn_job(label, move || {
             let result = Self::with_config(&path, &pin, |cfg| match action {
-                AdvancedAction::ToggleAlwaysUv => {
-                    cfg.toggle_always_uv().map_err(|e| e.to_string())
-                }
+                AdvancedAction::ToggleAlwaysUv => cfg.toggle_always_uv().map_err(|e| e.to_string()),
                 AdvancedAction::SetMinPin => cfg
                     .set_min_pin_length(min_pin, &[], force_change)
                     .map_err(|e| e.to_string()),
-                AdvancedAction::ForcePinChange => {
-                    cfg.force_pin_change().map_err(|e| e.to_string())
-                }
-                AdvancedAction::EnterpriseAttestation => {
-                    cfg.enable_enterprise_attestation().map_err(|e| e.to_string())
-                }
+                AdvancedAction::ForcePinChange => cfg.force_pin_change().map_err(|e| e.to_string()),
+                AdvancedAction::EnterpriseAttestation => cfg
+                    .enable_enterprise_attestation()
+                    .map_err(|e| e.to_string()),
                 AdvancedAction::None => Ok(()),
             });
             Box::new(move |app: &mut App| match result {
@@ -3472,114 +3461,6 @@ impl App {
         )
     }
 
-    fn watermark_texture(&mut self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
-        let dark = matches!(self.mode, Mode::Dark);
-        let slot = if dark { &mut self.wm_dark_theme } else { &mut self.wm_light_theme };
-        if slot.is_none() {
-            let file = if dark { "hero-watermark-light.png" } else { "hero-watermark-dark.png" };
-            let path = std::path::Path::new("crates/keyroost/assets/branding").join(file);
-            let loaded = std::fs::read(&path).ok().and_then(|b| decode_png_rgba(&b))
-                .map(|img| ctx.load_texture(format!("watermark-{file}"), img, egui::TextureOptions::LINEAR));
-            *slot = Some(loaded);
-        }
-        slot.as_ref().and_then(|o| o.clone())
-    }
-
-    fn paint_watermark(&mut self, ui: &egui::Ui, rect: egui::Rect) {
-        let Some(tex) = self.watermark_texture(ui.ctx()) else { return; };
-        let size = tex.size_vec2();
-        if size.x <= 0.0 { return; }
-        const HEADER_CLEARANCE: f32 = 140.0;
-        let top = rect.top() + HEADER_CLEARANCE;
-        let scale = rect.width() / size.x;
-        let draw = egui::Rect::from_min_size(egui::pos2(rect.left(), top), size * scale);
-        let alpha = if matches!(self.mode, Mode::Dark) { 0.34 } else { 0.15 };
-        let tint = egui::Color32::from_white_alpha((alpha * 255.0) as u8);
-        ui.painter().image(tex.id(), draw,
-            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), tint);
-    }
-
-    fn paint_central_motifs(&mut self, ui: &egui::Ui, rect: egui::Rect) {
-        let motifs = self.sidebar_motifs(ui.ctx());
-        if motifs.is_empty() { return; }
-        let alpha = if matches!(self.mode, Mode::Dark) { 0.20 } else { 0.09 };
-        let tint = egui::Color32::from_white_alpha((alpha * 255.0) as u8);
-        let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-        const HEADER_CLEARANCE: f32 = 140.0;
-        let safe_top = rect.top() + HEADER_CLEARANCE;
-        let spots = [
-            (0.86, 0.16, 96.0),
-            (0.70, 0.40, 84.0),
-            (0.90, 0.55, 78.0),
-            (0.78, 0.74, 104.0),
-            (0.40, 0.88, 88.0),
-            (0.62, 0.93, 80.0),
-        ];
-        for (i, &(fx, fy, w)) in spots.iter().enumerate() {
-            let tex = &motifs[i % motifs.len()];
-            let size = tex.size_vec2();
-            if size.x <= 0.0 { continue; }
-            let scale = w / size.x;
-            let draw_h = size.y * scale;
-            let mut top = rect.top() + rect.height() * fy;
-            if top < safe_top { top = safe_top; }
-            if top + draw_h > rect.bottom() { top = rect.bottom() - draw_h; }
-            let left = rect.left() + rect.width() * fx;
-            let left = left.min(rect.right() - w);
-            let draw = egui::Rect::from_min_size(egui::pos2(left, top), size * scale);
-            ui.painter().image(tex.id(), draw, uv, tint);
-        }
-    }
-
-    fn sidebar_motifs(&mut self, ctx: &egui::Context) -> Vec<egui::TextureHandle> {
-        let dark = matches!(self.mode, Mode::Dark);
-        let slot = if dark { &mut self.motifs_dark_theme } else { &mut self.motifs_light_theme };
-        if slot.is_none() {
-            let suffix = if dark { "light" } else { "dark" };
-            let names = ["motif-hex", "motif-shield", "motif-bag", "motif-hexrot", "motif-shieldrot", "motif-bagrot"];
-            let dir = std::path::Path::new("crates/keyroost/assets/branding");
-            let mut loaded = Vec::new();
-            for n in names {
-                let path = dir.join(format!("{n}-{suffix}.png"));
-                if let Some(img) = std::fs::read(&path).ok().and_then(|b| decode_png_rgba(&b)) {
-                    loaded.push(ctx.load_texture(format!("{n}-{suffix}"), img, egui::TextureOptions::LINEAR));
-                }
-            }
-            *slot = Some(loaded);
-        }
-        slot.clone().unwrap_or_default()
-    }
-
-    fn paint_sidebar_motifs(&mut self, ui: &egui::Ui, rect: egui::Rect) {
-        let motifs = self.sidebar_motifs(ui.ctx());
-        if motifs.is_empty() { return; }
-        let alpha = if matches!(self.mode, Mode::Dark) { 0.22 } else { 0.10 };
-        let tint = egui::Color32::from_white_alpha((alpha * 255.0) as u8);
-        let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-        const FOOTER_CLEARANCE: f32 = 60.0;
-        let safe_bottom = rect.bottom() - FOOTER_CLEARANCE;
-        let spots = [
-            (0.20, 0.09, 78.0),
-            (0.34, 0.27, 70.0),
-            (0.14, 0.45, 92.0),
-            (0.30, 0.63, 72.0),
-            (0.18, 0.80, 76.0),
-        ];
-        for (i, &(fx, fy, w)) in spots.iter().enumerate() {
-            let tex = &motifs[i % motifs.len()];
-            let size = tex.size_vec2();
-            if size.x <= 0.0 { continue; }
-            let scale = w / size.x;
-            let draw_h = size.y * scale;
-            let mut top = rect.top() + rect.height() * fy;
-            if top + draw_h > safe_bottom { top = safe_bottom - draw_h; }
-            if top < rect.top() { continue; }
-            let pos = egui::pos2(rect.left() + rect.width() * fx, top);
-            let draw = egui::Rect::from_min_size(pos, size * scale);
-            ui.painter().image(tex.id(), draw, uv, tint);
-        }
-    }
-
     /// The currently selected device, if the id still resolves to a present one.
     fn selected_device(&self) -> Option<&Device> {
         let id = self.selected_device.as_ref()?;
@@ -4737,24 +4618,6 @@ fn paint_check_icon(ui: &egui::Ui, center: egui::Pos2, color: egui::Color32) {
 }
 
 /// Cross — delete / dismiss.
-fn decode_png_rgba(bytes: &[u8]) -> Option<egui::ColorImage> {
-    let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
-    let mut reader = decoder.read_info().ok()?;
-    let mut buf = vec![0u8; reader.output_buffer_size()?];
-    let frame = reader.next_frame(&mut buf).ok()?;
-    let (w, h) = (frame.width as usize, frame.height as usize);
-    let data = &buf[..frame.buffer_size()];
-    let rgba: Vec<u8> = match frame.color_type {
-        png::ColorType::Rgba => data.to_vec(),
-        png::ColorType::Rgb => data.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect(),
-        png::ColorType::GrayscaleAlpha => data.chunks_exact(2).flat_map(|p| [p[0], p[0], p[0], p[1]]).collect(),
-        png::ColorType::Grayscale => data.iter().flat_map(|&g| [g, g, g, 255]).collect(),
-        _ => return None,
-    };
-    if rgba.len() != w * h * 4 { return None; }
-    Some(egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba))
-}
-
 fn paint_x_icon(ui: &egui::Ui, center: egui::Pos2, color: egui::Color32) {
     let s = egui::Stroke::new(1.4, color);
     ui.painter().line_segment(
@@ -5229,8 +5092,6 @@ impl App {
             .resizable(false)
             .frame(panel_frame(p.side, 14.0, 12.0))
             .show(ctx, |ui| {
-                let pane = ui.max_rect();
-                self.paint_sidebar_motifs(ui, pane);
                 ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new("DEVICES")
@@ -5379,49 +5240,46 @@ impl App {
         egui::CentralPanel::default()
             .frame(panel_frame(p.surface, 0.0, 0.0))
             .show(ctx, |ui| {
-                let bg = ui.max_rect();
-                self.paint_watermark(ui, bg);
-                self.paint_central_motifs(ui, bg);
                 match self.selected_device().cloned() {
-                None => self.empty_state(ui, p),
-                Some(dev) if dev.kind == DeviceKind::Token => self.molto_view(ui, p, &dev),
-                Some(dev) => {
-                    egui::Frame::none()
-                        .inner_margin(egui::Margin::symmetric(26.0, 16.0))
-                        .show(ui, |ui| {
-                            self.device_hero(ui, p, &dev);
-                            self.cap_tabs(ui, p, &dev);
-                            ui.add_space(16.0);
-                            // Hero + tabs stay pinned; the active pane scrolls.
-                            // This is the one place every capability pane gets
-                            // its overflow handling — a card-heavy OpenPGP pane
-                            // or a key holding dozens of passkeys/TOTP codes
-                            // scrolls instead of clipping at the window edge.
-                            // Salted per tab so each pane keeps its own
-                            // scroll position.
-                            //
-                            // Solid bar style: reserve a real gutter for the
-                            // scrollbar instead of floating it over the cards'
-                            // right edge (the floating bar sat on top of card
-                            // borders and the panes' top-right action buttons).
-                            ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
-                            egui::ScrollArea::vertical()
-                                .id_salt(("cap-pane", self.cap_tab as u8))
-                                .auto_shrink([false, false])
-                                .show(ui, |ui| {
-                                    match self.cap_tab {
-                                        CapTab::Overview => self.overview(ui, p, &dev),
-                                        CapTab::Fido2 => self.cap_fido2(ui, p),
-                                        CapTab::Oath => self.cap_oath(ui, p),
-                                        CapTab::Pgp => self.cap_pgp(ui, p),
-                                        CapTab::Piv => self.cap_piv(ui, p),
-                                        CapTab::Otp => self.cap_otp(ui, p),
-                                    }
-                                    // Breathing room below the last card.
-                                    ui.add_space(18.0);
-                                });
-                        });
-                }
+                    None => self.empty_state(ui, p),
+                    Some(dev) if dev.kind == DeviceKind::Token => self.molto_view(ui, p, &dev),
+                    Some(dev) => {
+                        egui::Frame::none()
+                            .inner_margin(egui::Margin::symmetric(26.0, 16.0))
+                            .show(ui, |ui| {
+                                self.device_hero(ui, p, &dev);
+                                self.cap_tabs(ui, p, &dev);
+                                ui.add_space(16.0);
+                                // Hero + tabs stay pinned; the active pane scrolls.
+                                // This is the one place every capability pane gets
+                                // its overflow handling — a card-heavy OpenPGP pane
+                                // or a key holding dozens of passkeys/TOTP codes
+                                // scrolls instead of clipping at the window edge.
+                                // Salted per tab so each pane keeps its own
+                                // scroll position.
+                                //
+                                // Solid bar style: reserve a real gutter for the
+                                // scrollbar instead of floating it over the cards'
+                                // right edge (the floating bar sat on top of card
+                                // borders and the panes' top-right action buttons).
+                                ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+                                egui::ScrollArea::vertical()
+                                    .id_salt(("cap-pane", self.cap_tab as u8))
+                                    .auto_shrink([false, false])
+                                    .show(ui, |ui| {
+                                        match self.cap_tab {
+                                            CapTab::Overview => self.overview(ui, p, &dev),
+                                            CapTab::Fido2 => self.cap_fido2(ui, p),
+                                            CapTab::Oath => self.cap_oath(ui, p),
+                                            CapTab::Pgp => self.cap_pgp(ui, p),
+                                            CapTab::Piv => self.cap_piv(ui, p),
+                                            CapTab::Otp => self.cap_otp(ui, p),
+                                        }
+                                        // Breathing room below the last card.
+                                        ui.add_space(18.0);
+                                    });
+                            });
+                    }
                 }
             });
     }
@@ -6282,9 +6140,7 @@ impl App {
             }
             ui.add_space(14.0);
             let mut next: Option<FidoSubview> = None;
-            // The background watermark is painted behind the whole panel, so the
-            // sub-tab labels would sit over the dashed art and become hard to
-            // read. Paint an opaque surface strip here first (full content width,
+            // Paint an opaque surface strip here first (full content width,
             // fixed height covering the label row + its underline) so the row has
             // a clean backing - drawn before the labels, so it sits under them.
             {
@@ -6303,7 +6159,9 @@ impl App {
                     let resp = ui
                         .add(
                             egui::Label::new(
-                                egui::RichText::new(*label).font(theme::f_sb(13.5)).color(color),
+                                egui::RichText::new(*label)
+                                    .font(theme::f_sb(13.5))
+                                    .color(color),
                             )
                             .sense(egui::Sense::click()),
                         )
@@ -6461,76 +6319,80 @@ impl App {
                 // The list (None until first read). Hidden while the wizard runs.
                 if !enrolling {
                     match &self.security_keys.fingerprints {
-                    None => {
-                        ui.label(
-                            egui::RichText::new("Click Reload to read enrolled fingerprints.")
-                                .font(theme::f_reg(13.0))
-                                .color(p.txt3),
-                        );
-                    }
-                    Some(list) if list.is_empty() => {
-                        ui.label(
-                            egui::RichText::new("No fingerprints enrolled yet.")
-                                .font(theme::f_reg(13.0))
-                                .color(p.txt3),
-                        );
-                    }
-                    Some(list) => {
-                        for e in list.iter() {
-                            let id = e.template_id.clone();
-                            ui.horizontal(|ui| {
-                                ui.monospace(hex_short(&id));
-                                // Inline rename editor for this row, or the name + buttons.
-                                let renaming = self
-                                    .security_keys
-                                    .fp_rename
-                                    .as_ref()
-                                    .is_some_and(|(rid, _)| rid == &id);
-                                if renaming {
-                                    if let Some((_, buf)) = self.security_keys.fp_rename.as_mut() {
-                                        ui.add_sized(
-                                            [160.0, 32.0],
-                                            egui::TextEdit::singleline(buf)
-                                                .vertical_align(egui::Align::Center),
+                        None => {
+                            ui.label(
+                                egui::RichText::new("Click Reload to read enrolled fingerprints.")
+                                    .font(theme::f_reg(13.0))
+                                    .color(p.txt3),
+                            );
+                        }
+                        Some(list) if list.is_empty() => {
+                            ui.label(
+                                egui::RichText::new("No fingerprints enrolled yet.")
+                                    .font(theme::f_reg(13.0))
+                                    .color(p.txt3),
+                            );
+                        }
+                        Some(list) => {
+                            for e in list.iter() {
+                                let id = e.template_id.clone();
+                                ui.horizontal(|ui| {
+                                    ui.monospace(hex_short(&id));
+                                    // Inline rename editor for this row, or the name + buttons.
+                                    let renaming = self
+                                        .security_keys
+                                        .fp_rename
+                                        .as_ref()
+                                        .is_some_and(|(rid, _)| rid == &id);
+                                    if renaming {
+                                        if let Some((_, buf)) =
+                                            self.security_keys.fp_rename.as_mut()
+                                        {
+                                            ui.add_sized(
+                                                [160.0, 32.0],
+                                                egui::TextEdit::singleline(buf)
+                                                    .vertical_align(egui::Align::Center),
+                                            );
+                                        }
+                                        if theme::button(ui, p, BtnKind::Primary, "Save").clicked()
+                                        {
+                                            if let Some((rid, buf)) =
+                                                self.security_keys.fp_rename.take()
+                                            {
+                                                fp_rename_commit = Some((rid, buf));
+                                            }
+                                        }
+                                        if theme::button(ui, p, BtnKind::Ghost, "Cancel").clicked()
+                                        {
+                                            self.security_keys.fp_rename = None;
+                                        }
+                                    } else {
+                                        let name =
+                                            e.friendly_name.as_deref().unwrap_or("(unnamed)");
+                                        ui.label(name);
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                if theme::button(ui, p, BtnKind::Ghost, "Delete")
+                                                    .clicked()
+                                                {
+                                                    self.security_keys.fp_confirm_delete =
+                                                        Some(id.clone());
+                                                }
+                                                if theme::button(ui, p, BtnKind::Ghost, "Rename")
+                                                    .clicked()
+                                                {
+                                                    self.security_keys.fp_rename = Some((
+                                                        id.clone(),
+                                                        e.friendly_name.clone().unwrap_or_default(),
+                                                    ));
+                                                }
+                                            },
                                         );
                                     }
-                                    if theme::button(ui, p, BtnKind::Primary, "Save").clicked() {
-                                        if let Some((rid, buf)) =
-                                            self.security_keys.fp_rename.take()
-                                        {
-                                            fp_rename_commit = Some((rid, buf));
-                                        }
-                                    }
-                                    if theme::button(ui, p, BtnKind::Ghost, "Cancel").clicked() {
-                                        self.security_keys.fp_rename = None;
-                                    }
-                                } else {
-                                    let name =
-                                        e.friendly_name.as_deref().unwrap_or("(unnamed)");
-                                    ui.label(name);
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            if theme::button(ui, p, BtnKind::Ghost, "Delete")
-                                                .clicked()
-                                            {
-                                                self.security_keys.fp_confirm_delete =
-                                                    Some(id.clone());
-                                            }
-                                            if theme::button(ui, p, BtnKind::Ghost, "Rename")
-                                                .clicked()
-                                            {
-                                                self.security_keys.fp_rename = Some((
-                                                    id.clone(),
-                                                    e.friendly_name.clone().unwrap_or_default(),
-                                                ));
-                                            }
-                                        },
-                                    );
-                                }
-                            });
+                                });
+                            }
                         }
-                    }
                     }
                 }
 
@@ -6591,7 +6453,8 @@ impl App {
                         ui.add_space(6.0);
                         self.help_dot(ui, p, "reset");
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if theme::button(ui, p, BtnKind::Danger, "Reset key\u{2026}").clicked() {
+                            if theme::button(ui, p, BtnKind::Danger, "Reset key\u{2026}").clicked()
+                            {
                                 arm_reset = true;
                             }
                         });
@@ -6646,8 +6509,8 @@ impl App {
                 // Always re-read immediately before writing so we append onto the
                 // authenticator's current array (not a stale cached copy), which
                 // protects any RP entries written since our last load.
-                let current = keyroost_ctap::large_blobs::read(&mut dev, &info)
-                    .map_err(|e| e.to_string())?;
+                let current =
+                    keyroost_ctap::large_blobs::read(&mut dev, &info).map_err(|e| e.to_string())?;
                 let _ = loaded; // cached copy only informs the UI, not the write
 
                 let token = keyroost_ctap::client_pin::get_pin_uv_auth_token(
@@ -6672,7 +6535,10 @@ impl App {
                     app.security_keys.large_blobs = Some(array);
                     app.security_keys.lb_new_text.clear();
                     app.security_keys.lb_show_add = false;
-                    app.security_keys.lb_status = Some(format!("Saved. {n} entr{} total.", if n == 1 { "y" } else { "ies" }));
+                    app.security_keys.lb_status = Some(format!(
+                        "Saved. {n} entr{} total.",
+                        if n == 1 { "y" } else { "ies" }
+                    ));
                     app.security_keys.error = None;
                 }
                 Err(e) => {
@@ -6706,12 +6572,12 @@ impl App {
 
                 // Re-read live so we edit the authenticator's current array and
                 // never clobber RP entries written since our last load.
-                let current = keyroost_ctap::large_blobs::read(&mut dev, &info)
-                    .map_err(|e| e.to_string())?;
-                let updated = current
-                    .with_replaced_note(idx, &text)
-                    .ok_or("that entry is not an editable keyroost note (it may have \
-                            changed on the key — reload and try again)")?;
+                let current =
+                    keyroost_ctap::large_blobs::read(&mut dev, &info).map_err(|e| e.to_string())?;
+                let updated = current.with_replaced_note(idx, &text).ok_or(
+                    "that entry is not an editable keyroost note (it may have \
+                            changed on the key — reload and try again)",
+                )?;
 
                 let token = keyroost_ctap::client_pin::get_pin_uv_auth_token(
                     &mut dev,
@@ -6763,8 +6629,10 @@ impl App {
                 let n = array.entries.len();
                 self.security_keys.large_blobs = Some(array);
                 self.security_keys.lb_selected = None;
-                self.security_keys.lb_status =
-                    Some(format!("Loaded {n} entr{}.", if n == 1 { "y" } else { "ies" }));
+                self.security_keys.lb_status = Some(format!(
+                    "Loaded {n} entr{}.",
+                    if n == 1 { "y" } else { "ies" }
+                ));
             }
             Err(e) => {
                 self.security_keys.lb_status = Some(format!("Load failed: {e}"));
@@ -6830,8 +6698,7 @@ impl App {
                     let n = array.entries.len();
                     app.security_keys.large_blobs = Some(array);
                     app.security_keys.lb_selected = None;
-                    app.security_keys.lb_status =
-                        Some(format!("Entry deleted. {n} remaining."));
+                    app.security_keys.lb_status = Some(format!("Entry deleted. {n} remaining."));
                     app.security_keys.error = None;
                 }
                 Err(e) => {
@@ -7021,10 +6888,11 @@ impl App {
                                 if is_open { None } else { Some(idx) };
                         }
                         // Edit only applies to keyroost's own notes.
-                        if note_text.is_some() && editing != Some(idx) {
-                            if theme::button(ui, p, BtnKind::Ghost, "Edit").clicked() {
-                                start_edit = Some((idx, note_text.clone().unwrap_or_default()));
-                            }
+                        if note_text.is_some()
+                            && editing != Some(idx)
+                            && theme::button(ui, p, BtnKind::Ghost, "Edit").clicked()
+                        {
+                            start_edit = Some((idx, note_text.clone().unwrap_or_default()));
                         }
                     });
                 });
@@ -7237,11 +7105,9 @@ impl App {
                             .color(p.txt),
                     );
                     ui.label(
-                        egui::RichText::new(
-                            "Can only be raised, never lowered without a reset.",
-                        )
-                        .font(theme::f_reg(11.5))
-                        .color(p.txt3),
+                        egui::RichText::new("Can only be raised, never lowered without a reset.")
+                            .font(theme::f_reg(11.5))
+                            .color(p.txt3),
                     );
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -7298,7 +7164,8 @@ impl App {
                         if ep_enabled {
                             // Already enabled: nothing actionable, show a pill.
                             theme::pill(ui, "Enabled", p.ok, p.ok_soft());
-                        } else if theme::button(ui, p, BtnKind::Danger, "Enable\u{2026}").clicked() {
+                        } else if theme::button(ui, p, BtnKind::Danger, "Enable\u{2026}").clicked()
+                        {
                             arm = Some(AdvancedAction::EnterpriseAttestation);
                         }
                     });
@@ -7387,15 +7254,24 @@ impl App {
         // (which only borrows `ui`) doesn't need the mutex.
         let (captured, total, last_message, done) = {
             let Ok(g) = prog.lock() else { return };
-            (g.captured, g.total.max(1), g.last_message.clone(), g.done.clone())
+            (
+                g.captured,
+                g.total.max(1),
+                g.last_message.clone(),
+                g.done.clone(),
+            )
         };
         let frac = (captured as f32 / total as f32).clamp(0.0, 1.0);
         let finished = done.is_some();
 
         let mut want_cancel = false;
         let mut want_done = false;
-        let closed = Self::modal_window(ctx, p, "fp_enroll", "Enroll fingerprint", |ui| {
-            match &done {
+        let closed = Self::modal_window(
+            ctx,
+            p,
+            "fp_enroll",
+            "Enroll fingerprint",
+            |ui| match &done {
                 None => {
                     ui.label(
                         egui::RichText::new(format!(
@@ -7439,8 +7315,8 @@ impl App {
                         want_done = true;
                     }
                 }
-            }
-        });
+            },
+        );
 
         if want_cancel {
             // Signal the worker to abort the capture between samples.
@@ -7535,21 +7411,19 @@ impl App {
             .resizable(false)
             .title_bar(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .frame(
-                egui::Frame {
-                    inner_margin: egui::Margin::same(20.0),
-                    rounding: egui::Rounding::same(13.0),
-                    fill: p.pop,
-                    stroke: egui::Stroke::new(1.0, p.line),
-                    shadow: egui::epaint::Shadow {
-                        offset: egui::vec2(0.0, 12.0),
-                        blur: 40.0,
-                        spread: 0.0,
-                        color: egui::Color32::from_black_alpha(115),
-                    },
-                    ..Default::default()
+            .frame(egui::Frame {
+                inner_margin: egui::Margin::same(20.0),
+                rounding: egui::Rounding::same(13.0),
+                fill: p.pop,
+                stroke: egui::Stroke::new(1.0, p.line),
+                shadow: egui::epaint::Shadow {
+                    offset: egui::vec2(0.0, 12.0),
+                    blur: 40.0,
+                    spread: 0.0,
+                    color: egui::Color32::from_black_alpha(115),
                 },
-            )
+                ..Default::default()
+            })
             .show(ctx, |ui| {
                 ui.set_max_width(300.0);
                 // Custom title at the button font size (the default window title

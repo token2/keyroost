@@ -46,10 +46,10 @@
 //! fragments must follow immediately at increasing offsets.
 
 use crate::cbor::{self, Value};
+use crate::client_pin::PinUvAuthToken;
 use crate::cmd::{AuthenticatorInfo, CtapError};
 use crate::hid::{CtapHidDevice, CTAPHID_CBOR};
 use crate::pin::left16_sha256;
-use crate::client_pin::PinUvAuthToken;
 
 /// CTAP command byte for `authenticatorLargeBlobs`.
 const CTAP2_LARGE_BLOBS: u8 = 0x0C;
@@ -192,7 +192,10 @@ fn encode_entries(entries: &[LargeBlobEntry]) -> Vec<u8> {
         .iter()
         .map(|e| {
             Value::Map(vec![
-                (Value::UInt(ENTRY_CIPHERTEXT), Value::Bytes(e.ciphertext.clone())),
+                (
+                    Value::UInt(ENTRY_CIPHERTEXT),
+                    Value::Bytes(e.ciphertext.clone()),
+                ),
                 (Value::UInt(ENTRY_NONCE), Value::Bytes(e.nonce.clone())),
                 (Value::UInt(ENTRY_ORIG_SIZE), Value::UInt(e.orig_size)),
             ])
@@ -225,11 +228,7 @@ fn dispatch(dev: &mut CtapHidDevice, params: Value) -> Result<Value, CtapError> 
 }
 
 /// Read one fragment beginning at `offset`, asking for at most `count` bytes.
-fn read_fragment(
-    dev: &mut CtapHidDevice,
-    offset: u64,
-    count: u64,
-) -> Result<Vec<u8>, CtapError> {
+fn read_fragment(dev: &mut CtapHidDevice, offset: u64, count: u64) -> Result<Vec<u8>, CtapError> {
     let params = Value::Map(vec![
         (Value::UInt(KEY_GET), Value::UInt(count)),
         (Value::UInt(KEY_OFFSET), Value::UInt(offset)),
@@ -248,12 +247,17 @@ fn read_fragment(
             ));
         }
     }
-    Err(CtapError::InvalidResponseShape("largeBlobs get: missing config"))
+    Err(CtapError::InvalidResponseShape(
+        "largeBlobs get: missing config",
+    ))
 }
 
 /// Read the entire serialized large-blob array, verify its checksum, and parse
 /// the entries. Requires no PIN/UV.
-pub fn read(dev: &mut CtapHidDevice, info: &AuthenticatorInfo) -> Result<LargeBlobArray, CtapError> {
+pub fn read(
+    dev: &mut CtapHidDevice,
+    info: &AuthenticatorInfo,
+) -> Result<LargeBlobArray, CtapError> {
     let frag = max_fragment_length(info) as u64;
 
     // First read tells us how much there is by simply continuing until a short
@@ -271,17 +275,23 @@ pub fn read(dev: &mut CtapHidDevice, info: &AuthenticatorInfo) -> Result<LargeBl
         offset += got;
         // Safety valve: large-blob stores are small; refuse to loop forever.
         if data.len() > 64 * 1024 {
-            return Err(CtapError::InvalidResponseShape("largeBlobs: array too large"));
+            return Err(CtapError::InvalidResponseShape(
+                "largeBlobs: array too large",
+            ));
         }
     }
 
     if data.len() < CHECKSUM_LEN {
-        return Err(CtapError::InvalidResponseShape("largeBlobs: array shorter than checksum"));
+        return Err(CtapError::InvalidResponseShape(
+            "largeBlobs: array shorter than checksum",
+        ));
     }
     let (array_bytes, trailer) = data.split_at(data.len() - CHECKSUM_LEN);
     let expected = left16_sha256(array_bytes);
     if trailer != expected {
-        return Err(CtapError::InvalidResponseShape("largeBlobs: checksum mismatch"));
+        return Err(CtapError::InvalidResponseShape(
+            "largeBlobs: checksum mismatch",
+        ));
     }
 
     let entries = parse_entries(array_bytes)?;
@@ -299,7 +309,9 @@ fn parse_entries(array_bytes: &[u8]) -> Result<Vec<LargeBlobEntry>, CtapError> {
     let mut entries = Vec::with_capacity(items.len());
     for item in items {
         let Value::Map(map) = item else {
-            return Err(CtapError::InvalidResponseShape("largeBlobs: entry not a map"));
+            return Err(CtapError::InvalidResponseShape(
+                "largeBlobs: entry not a map",
+            ));
         };
         let mut ciphertext = None;
         let mut nonce = None;
@@ -384,7 +396,10 @@ pub fn write(
         if offset == 0 {
             entries.push((Value::UInt(KEY_LENGTH), Value::UInt(total)));
         }
-        entries.push((Value::UInt(KEY_PIN_UV_AUTH_PROTOCOL), Value::UInt(token.protocol as u64)));
+        entries.push((
+            Value::UInt(KEY_PIN_UV_AUTH_PROTOCOL),
+            Value::UInt(token.protocol as u64),
+        ));
         entries.push((Value::UInt(KEY_PIN_UV_AUTH_PARAM), Value::Bytes(auth)));
 
         dispatch(dev, Value::Map(entries))?;

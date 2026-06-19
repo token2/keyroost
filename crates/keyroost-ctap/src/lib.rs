@@ -17,9 +17,9 @@ pub mod cbor;
 pub mod client_pin;
 pub mod cmd;
 pub mod config;
-pub mod large_blobs;
 pub mod cred_mgmt;
 pub mod hid;
+pub mod large_blobs;
 pub mod pin;
 
 pub use bio_enroll::{BioEnrollment, CaptureStatus, Enrollment, SensorInfo};
