@@ -639,16 +639,20 @@ their detailed design follows #38 landing.
       `force-pin-change` / `enterprise-attestation`) + LargeBlob (GUI) + the
       FIDO2 tab redesign + bordered inputs — **MERGED via #38** onto v0.7.0
       (Token2-authored; the unintentional branding was left out). CLI commands
-      are correctly nested under `fido`. Read path hardware-checked on a
-      YubiKey 5.7 (`authnrCfg`/`setMinPINLength`/`largeBlobs` all surfaced).
+      are correctly nested under `fido`. **Hardware-verified on a YubiKey 5.7
+      (2026-06-19):** getInfo read path, GUI redesign (branding confirmed gone),
+      LargeBlob write→read round-trip, the `always-uv` config write, and
+      capability-gating (Settings/Storage correctly hidden on a Solo 2 that
+      lacks `authnrCfg`/`largeBlobs`).
 - [ ] **LargeBlob CLI parity** — add a `fido large-blob` group (list / get /
       dump + add / delete notes, with `--json`) so LargeBlob isn't the lone
       GUI-only capability. The byte layer (`keyroost-ctap::large_blobs`) already
       exists; this is wiring on top. Warn on writes — the array is
       world-readable (not a secret vault). (S)
-- [ ] **Hardware-verify the config WRITE ops** — exercise `always-uv`
-      (reversible) plus the one-way ops (`set-min-pin`, `enterprise-attestation`)
-      on a key, with a `fido reset` to recover (tester key is reset-safe).
+- [~] **Hardware-verify the config WRITE ops** — `always-uv` (reversible)
+      verified on a YubiKey 5.7 (2026-06-19). Remaining (optional, low priority,
+      one-way): `set-min-pin` + `enterprise-attestation` — exercise with a
+      `fido reset` to recover when convenient.
 
 ### H. Protocol confirmation
 - [ ] Confirm the Molto2 `read_info` 3-byte preamble + 2-byte separator are
