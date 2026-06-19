@@ -33,6 +33,17 @@ pub enum CtapError {
     InvalidArgument(&'static str),
 }
 
+impl CtapError {
+    /// True when this is a PIN / PIN-auth failure raised *during* an
+    /// already-authenticated session: `0x31` (PIN_INVALID), `0x33`
+    /// (PIN_AUTH_INVALID), or `0x34` (PIN_AUTH_BLOCKED). Callers use this to
+    /// decide whether an in-flight session has been invalidated by the key and
+    /// must be re-unlocked. Non-`StatusCode` errors are never PIN/auth errors.
+    pub fn is_pin_auth_error(&self) -> bool {
+        matches!(self, CtapError::StatusCode(0x31 | 0x33 | 0x34))
+    }
+}
+
 impl std::fmt::Display for CtapError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -323,6 +334,21 @@ mod tests {
         assert_eq!(info.option("unknown"), None);
         assert_eq!(info.max_msg_size, Some(1200));
         assert_eq!(info.pin_uv_auth_protocols, vec![1]);
+        // 0x0C/0x0D are the new arms; 0x0E firmwareVersion stays put.
+        assert_eq!(info.force_pin_change, Some(true));
+        assert_eq!(info.min_pin_length, Some(6));
+        assert_eq!(info.firmware_version, Some(328706));
+    }
+
+    #[test]
+    fn classifies_pin_auth_errors_for_relock() {
+        assert!(CtapError::StatusCode(0x31).is_pin_auth_error());
+        assert!(CtapError::StatusCode(0x33).is_pin_auth_error());
+        assert!(CtapError::StatusCode(0x34).is_pin_auth_error());
+        // Non-PIN-auth status codes and other variants must not re-lock.
+        assert!(!CtapError::StatusCode(0x32).is_pin_auth_error());
+        assert!(!CtapError::StatusCode(0x30).is_pin_auth_error());
+        assert!(!CtapError::EmptyResponse.is_pin_auth_error());
     }
 
     #[test]

@@ -27,6 +27,50 @@ use keyroost_hid::HidDevice;
 
 const PROFILES: u8 = 100;
 
+/// Error from an unlocked-session FIDO operation, carrying both a
+/// human-readable message and whether it was a PIN / PIN-auth failure that
+/// invalidated the session. Worker closures produce this so their completion
+/// closures can decide (via [`App::fail_session_op`]) whether to auto-lock.
+struct SessionOpError {
+    message: String,
+    relock: bool,
+}
+
+impl SessionOpError {
+    /// A non-PIN failure (HID open, U2F-only device, etc.): never re-locks.
+    fn msg(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            relock: false,
+        }
+    }
+
+    /// Classify a CTAP error: PIN / PIN-auth codes (`0x31` / `0x33` / `0x34`)
+    /// mark the session as invalidated so the caller re-locks.
+    fn from_ctap(err: keyroost_ctap::CtapError) -> Self {
+        Self {
+            relock: err.is_pin_auth_error(),
+            message: err.to_string(),
+        }
+    }
+
+    /// Classify a boxed error from an op path that returns `Box<dyn Error>`
+    /// (e.g. passkey delete/refresh). Downcasts to [`CtapError`] to recover the
+    /// status byte; non-CTAP errors never re-lock.
+    fn from_boxed(err: Box<dyn std::error::Error>) -> Self {
+        match err.downcast::<keyroost_ctap::CtapError>() {
+            Ok(ctap) => Self::from_ctap(*ctap),
+            Err(other) => Self::msg(other.to_string()),
+        }
+    }
+}
+
+impl std::fmt::Display for SessionOpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 #[derive(Default)]
 struct SecurityKeysState {
     /// CTAP info for the selected device, fetched lazily after selection.
@@ -1706,6 +1750,26 @@ impl App {
         wipe(&mut self.security_keys.pin_input);
     }
 
+    /// Resolve a failed unlocked-session operation. When the underlying CTAP
+    /// error is a PIN / PIN-auth failure (`0x31` / `0x33` / `0x34`) the key has
+    /// invalidated the in-flight session, so we drop it and ask the user to
+    /// unlock again. Any other failure keeps the existing behavior: surface the
+    /// caller's contextual message. Auto-lock applies ONLY to operations that
+    /// already hold a session — `try_unlock`'s own wrong-PIN handling is left
+    /// untouched.
+    fn fail_session_op(&mut self, err: &SessionOpError, context: &str) {
+        if err.relock {
+            self.lock_session();
+            self.security_keys.error = Some(
+                "the key re-locked (PIN or session changed) \u{2014} \
+                 unlock again to continue."
+                    .into(),
+            );
+        } else {
+            self.security_keys.error = Some(format!("{context}: {err}"));
+        }
+    }
+
     fn refresh_credentials(&mut self) {
         // Check busy *before* taking the session — spawn_job would silently
         // drop the job, destroying the unlocked session (and its PIN token)
@@ -1722,10 +1786,11 @@ impl App {
         let token = session.token;
         let pin = session.pin;
         self.spawn_job("Refreshing credentials\u{2026}", move || {
-            let result = Self::refresh_with_token(&path, token, pin).map_err(|e| e.to_string());
+            let result =
+                Self::refresh_with_token(&path, token, pin).map_err(SessionOpError::from_boxed);
             Box::new(move |app: &mut App| match result {
                 Ok(fresh) => app.security_keys.session = Some(fresh),
-                Err(e) => app.security_keys.error = Some(format!("refresh failed: {}", e)),
+                Err(e) => app.fail_session_op(&e, "refresh failed"),
             })
         });
     }
@@ -1776,19 +1841,22 @@ impl App {
     fn with_fresh_bio<T>(
         path: &std::path::Path,
         pin: &str,
-        f: impl FnOnce(&mut keyroost_ctap::bio_enroll::BioEnrollment) -> Result<T, String>,
-    ) -> Result<T, String> {
-        let (mut dev, init) = CtapHidDevice::open(path).map_err(|e| e.to_string())?;
+        f: impl FnOnce(&mut keyroost_ctap::bio_enroll::BioEnrollment) -> Result<T, SessionOpError>,
+    ) -> Result<T, SessionOpError> {
+        let (mut dev, init) =
+            CtapHidDevice::open(path).map_err(|e| SessionOpError::msg(e.to_string()))?;
         if !init.supports_cbor() {
-            return Err("device is U2F-only".into());
+            return Err(SessionOpError::msg("device is U2F-only"));
         }
-        let info = keyroost_ctap::get_info(&mut dev).map_err(|e| e.to_string())?;
+        let info = keyroost_ctap::get_info(&mut dev).map_err(SessionOpError::from_ctap)?;
         let cmd_code = if info.option("bioEnroll").is_some() {
             keyroost_ctap::bio_enroll::CTAP2_BIO_ENROLLMENT
         } else if info.option("userVerificationMgmtPreview").is_some() {
             keyroost_ctap::bio_enroll::CTAP2_BIO_ENROLLMENT_PREVIEW
         } else {
-            return Err("key does not support fingerprint enrollment".into());
+            return Err(SessionOpError::msg(
+                "key does not support fingerprint enrollment",
+            ));
         };
         let token = keyroost_ctap::client_pin::get_pin_uv_auth_token(
             &mut dev,
@@ -1796,7 +1864,7 @@ impl App {
             &info,
             keyroost_ctap::client_pin::permissions::BIO_ENROLLMENT,
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(SessionOpError::from_ctap)?;
         let mut bio = keyroost_ctap::bio_enroll::BioEnrollment::new(&mut dev, token, cmd_code);
         f(&mut bio)
     }
@@ -1816,14 +1884,14 @@ impl App {
         let pin = session.pin.clone();
         self.spawn_job("Reading fingerprints\u{2026}", move || {
             let result = Self::with_fresh_bio(&path, &pin, |bio| {
-                bio.enumerate().map_err(|e| e.to_string())
+                bio.enumerate().map_err(SessionOpError::from_ctap)
             });
             Box::new(move |app: &mut App| match result {
                 Ok(list) => {
                     app.security_keys.fingerprints = Some(list);
                     app.security_keys.error = None;
                 }
-                Err(e) => app.security_keys.error = Some(format!("fingerprint list failed: {e}")),
+                Err(e) => app.fail_session_op(&e, "fingerprint list failed"),
             })
         });
     }
@@ -1858,16 +1926,17 @@ impl App {
 
         self.spawn_job("Enrolling fingerprint\u{2026}", move || {
             use keyroost_ctap::bio_enroll::sample_status_message;
-            let result = (|| -> Result<Vec<keyroost_ctap::Enrollment>, String> {
-                let (mut dev, init) = CtapHidDevice::open(&path).map_err(|e| e.to_string())?;
+            let result = (|| -> Result<Vec<keyroost_ctap::Enrollment>, SessionOpError> {
+                let (mut dev, init) =
+                    CtapHidDevice::open(&path).map_err(|e| SessionOpError::msg(e.to_string()))?;
                 if !init.supports_cbor() {
-                    return Err("device is U2F-only".into());
+                    return Err(SessionOpError::msg("device is U2F-only"));
                 }
                 // Wire the cooperative-cancel flag into the transport so a
                 // capture blocked waiting for a touch aborts promptly (at the
                 // next KEEPALIVE) when the user clicks Cancel.
                 dev.set_cancel_flag(cancel_flag.clone());
-                let info = keyroost_ctap::get_info(&mut dev).map_err(|e| e.to_string())?;
+                let info = keyroost_ctap::get_info(&mut dev).map_err(SessionOpError::from_ctap)?;
                 let cmd_code = if info.option("bioEnroll").is_some() {
                     keyroost_ctap::bio_enroll::CTAP2_BIO_ENROLLMENT
                 } else {
@@ -1880,7 +1949,7 @@ impl App {
                     &info,
                     keyroost_ctap::client_pin::permissions::BIO_ENROLLMENT,
                 )
-                .map_err(|e| e.to_string())?;
+                .map_err(SessionOpError::from_ctap)?;
                 let mut bio =
                     keyroost_ctap::bio_enroll::BioEnrollment::new(&mut dev, token, cmd_code);
 
@@ -1891,7 +1960,7 @@ impl App {
                     .unwrap_or(0);
 
                 let (template_id, mut status) =
-                    bio.enroll_begin(None).map_err(|e| e.to_string())?;
+                    bio.enroll_begin(None).map_err(SessionOpError::from_ctap)?;
                 // captured = total - remaining (clamped), so the bar advances
                 // even though the protocol reports "remaining".
                 let update = |p: &std::sync::Mutex<EnrollProgress>,
@@ -1923,9 +1992,9 @@ impl App {
                             // itself would be cancelled at its first KEEPALIVE.
                             cancel_flag.store(false, std::sync::atomic::Ordering::Relaxed);
                             let _ = bio.cancel_enrollment();
-                            return Err("cancelled".into());
+                            return Err(SessionOpError::msg("cancelled"));
                         }
-                        Err(e) => return Err(e.to_string()),
+                        Err(e) => return Err(SessionOpError::from_ctap(e)),
                     }
                     let total = total.max(status.remaining_samples + 1);
                     update(
@@ -1938,14 +2007,14 @@ impl App {
 
                 if let Some(n) = &name {
                     bio.set_friendly_name(&template_id, n)
-                        .map_err(|e| e.to_string())?;
+                        .map_err(SessionOpError::from_ctap)?;
                 }
-                bio.enumerate().map_err(|e| e.to_string())
+                bio.enumerate().map_err(SessionOpError::from_ctap)
             })();
 
             // Mark the shared cell done (success or failure) for the UI.
             if let Ok(mut g) = progress.lock() {
-                g.done = Some(result.as_ref().map(|_| ()).map_err(|e| e.clone()));
+                g.done = Some(result.as_ref().map(|_| ()).map_err(|e| e.message.clone()));
                 if result.is_ok() {
                     g.last_message = "Fingerprint enrolled.".into();
                     g.captured = g.total;
@@ -1959,14 +2028,14 @@ impl App {
                         app.security_keys.fp_new_name.clear();
                         app.security_keys.error = None;
                     }
-                    Err(e) if e == "cancelled" => {
+                    Err(e) if e.message == "cancelled" => {
                         // User cancelled — dismiss the wizard without an error
                         // banner, and refresh the list so it reflects reality.
                         app.security_keys.fp_progress = None;
                         app.security_keys.error = None;
                         app.refresh_fingerprints();
                     }
-                    Err(e) => app.security_keys.error = Some(format!("enroll failed: {e}")),
+                    Err(e) => app.fail_session_op(&e, "enroll failed"),
                 }
                 // Leave fp_progress in place briefly so the UI shows the final
                 // "enrolled" state; it's cleared on the next user action.
@@ -1989,12 +2058,12 @@ impl App {
         self.spawn_job("Deleting fingerprint\u{2026}", move || {
             let result = Self::with_fresh_bio(&path, &pin, |bio| {
                 bio.remove_enrollment(&template_id)
-                    .map_err(|e| e.to_string())?;
-                bio.enumerate().map_err(|e| e.to_string())
+                    .map_err(SessionOpError::from_ctap)?;
+                bio.enumerate().map_err(SessionOpError::from_ctap)
             });
             Box::new(move |app: &mut App| match result {
                 Ok(list) => app.security_keys.fingerprints = Some(list),
-                Err(e) => app.security_keys.error = Some(format!("delete failed: {e}")),
+                Err(e) => app.fail_session_op(&e, "delete failed"),
             })
         });
     }
@@ -2014,12 +2083,12 @@ impl App {
         self.spawn_job("Renaming fingerprint\u{2026}", move || {
             let result = Self::with_fresh_bio(&path, &pin, |bio| {
                 bio.set_friendly_name(&template_id, &new_name)
-                    .map_err(|e| e.to_string())?;
-                bio.enumerate().map_err(|e| e.to_string())
+                    .map_err(SessionOpError::from_ctap)?;
+                bio.enumerate().map_err(SessionOpError::from_ctap)
             });
             Box::new(move |app: &mut App| match result {
                 Ok(list) => app.security_keys.fingerprints = Some(list),
-                Err(e) => app.security_keys.error = Some(format!("rename failed: {e}")),
+                Err(e) => app.fail_session_op(&e, "rename failed"),
             })
         });
     }
@@ -2031,15 +2100,18 @@ impl App {
     fn with_config<T>(
         path: &std::path::Path,
         pin: &str,
-        f: impl FnOnce(&mut keyroost_ctap::config::Configurator) -> Result<T, String>,
-    ) -> Result<T, String> {
-        let (mut dev, init) = CtapHidDevice::open(path).map_err(|e| e.to_string())?;
+        f: impl FnOnce(&mut keyroost_ctap::config::Configurator) -> Result<T, SessionOpError>,
+    ) -> Result<T, SessionOpError> {
+        let (mut dev, init) =
+            CtapHidDevice::open(path).map_err(|e| SessionOpError::msg(e.to_string()))?;
         if !init.supports_cbor() {
-            return Err("device is U2F-only".into());
+            return Err(SessionOpError::msg("device is U2F-only"));
         }
-        let info = keyroost_ctap::get_info(&mut dev).map_err(|e| e.to_string())?;
+        let info = keyroost_ctap::get_info(&mut dev).map_err(SessionOpError::from_ctap)?;
         if info.option("authnrCfg") != Some(true) {
-            return Err("this key does not support authenticatorConfig".into());
+            return Err(SessionOpError::msg(
+                "this key does not support authenticatorConfig",
+            ));
         }
         let token = keyroost_ctap::client_pin::get_pin_uv_auth_token(
             &mut dev,
@@ -2047,9 +2119,9 @@ impl App {
             &info,
             keyroost_ctap::client_pin::permissions::AUTHENTICATOR_CONFIGURATION,
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(SessionOpError::from_ctap)?;
         let mut cfg = keyroost_ctap::config::Configurator::new(&mut dev, token, &info)
-            .map_err(|e| e.to_string())?;
+            .map_err(SessionOpError::from_ctap)?;
         f(&mut cfg)
     }
 
@@ -2089,14 +2161,18 @@ impl App {
         };
         self.spawn_job(label, move || {
             let result = Self::with_config(&path, &pin, |cfg| match action {
-                AdvancedAction::ToggleAlwaysUv => cfg.toggle_always_uv().map_err(|e| e.to_string()),
+                AdvancedAction::ToggleAlwaysUv => {
+                    cfg.toggle_always_uv().map_err(SessionOpError::from_ctap)
+                }
                 AdvancedAction::SetMinPin => cfg
                     .set_min_pin_length(min_pin, &[], force_change)
-                    .map_err(|e| e.to_string()),
-                AdvancedAction::ForcePinChange => cfg.force_pin_change().map_err(|e| e.to_string()),
+                    .map_err(SessionOpError::from_ctap),
+                AdvancedAction::ForcePinChange => {
+                    cfg.force_pin_change().map_err(SessionOpError::from_ctap)
+                }
                 AdvancedAction::EnterpriseAttestation => cfg
                     .enable_enterprise_attestation()
-                    .map_err(|e| e.to_string()),
+                    .map_err(SessionOpError::from_ctap),
                 AdvancedAction::None => Ok(()),
             });
             Box::new(move |app: &mut App| match result {
@@ -2106,7 +2182,7 @@ impl App {
                     // Re-read info so alwaysUv / minPinLength reflect the change.
                     app.fetch_selected_info();
                 }
-                Err(e) => app.security_keys.error = Some(format!("config change failed: {e}")),
+                Err(e) => app.fail_session_op(&e, "config change failed"),
             })
         });
     }
@@ -2126,13 +2202,13 @@ impl App {
             // Delete, then re-list in the same job so the UI updates atomically.
             let result = Self::try_delete(&path, token, &cred_id)
                 .and_then(|()| Self::refresh_with_token(&path, token_refresh, pin_refresh))
-                .map_err(|e| e.to_string());
+                .map_err(SessionOpError::from_boxed);
             Box::new(move |app: &mut App| match result {
                 Ok(fresh) => {
                     app.security_keys.session = Some(fresh);
                     app.security_keys.error = None;
                 }
-                Err(e) => app.security_keys.error = Some(format!("delete failed: {}", e)),
+                Err(e) => app.fail_session_op(&e, "delete failed"),
             })
         });
     }
