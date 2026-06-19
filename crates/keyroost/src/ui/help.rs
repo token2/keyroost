@@ -67,7 +67,7 @@ pub fn help(topic: &str) -> Option<&'static Help> {
         },
         "fingerprint" => &Help {
             title: "Fingerprints (biometric enrollment)",
-            body: "Enroll, rename, and delete fingerprints on a biometric Token2 key via CTAP2 authenticatorBioEnrollment. Enrolled fingerprints let the key satisfy user verification by touch instead of typing the PIN. Requires the PIN to manage. Templates live on the device and never leave it.",
+            body: "Enroll, rename, and delete fingerprints on a biometric key via CTAP2 authenticatorBioEnrollment. Enrolled fingerprints let the key satisfy user verification by touch instead of typing the PIN. Requires the PIN to manage. Templates live on the device and never leave it.",
             slug: "/fingerprint",
         },
         "touch-hotp" => &Help {

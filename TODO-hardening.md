@@ -645,10 +645,17 @@ their detailed design follows #38 landing.
       capability-gating (Settings/Storage correctly hidden on a Solo 2 that
       lacks `authnrCfg`/`largeBlobs`).
 - [ ] **LargeBlob CLI parity** — add a `fido large-blob` group (list / get /
-      dump + add / delete notes, with `--json`) so LargeBlob isn't the lone
-      GUI-only capability. The byte layer (`keyroost-ctap::large_blobs`) already
-      exists; this is wiring on top. Warn on writes — the array is
-      world-readable (not a secret vault). (S)
+      dump + add / delete notes + **clear-all**, with `--json`) so LargeBlob
+      isn't the lone GUI-only capability. The byte layer
+      (`keyroost-ctap::large_blobs`) already exists; this is wiring on top. Warn
+      on writes — the array is world-readable (not a secret vault). (S)
+- [ ] **LargeBlob survives `authenticatorReset` (privacy gap).** Confirmed on a
+      YubiKey 5.7 (2026-06-19): a FIDO reset wipes credentials/PIN but **not**
+      the large-blob array — so the plaintext notes the Token2 feature lets you
+      store persist after a "reset." keyroost issues the standard reset (correct;
+      largeBlob-on-reset is vendor-specific), but we should (a) add a **"clear
+      large-blob storage"** action (write an empty array) and (b) note in the
+      reset confirmation that reset does not wipe large-blob storage. (S)
 - [~] **Hardware-verify the config WRITE ops** — `always-uv` (reversible)
       verified on a YubiKey 5.7 (2026-06-19). Remaining (optional, low priority,
       one-way): `set-min-pin` + `enterprise-attestation` — exercise with a
