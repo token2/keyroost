@@ -589,6 +589,13 @@ configured (see `packaging/README.md`):
       keyboard zoom, persisted via eframe storage (default 100%, unchanged for
       existing users). Scales fonts + symbols + widgets uniformly. (FUTURE:
       broader theming/font customization — roadmap when picked up.)
+- [ ] **Responsive layout at high zoom / narrow window** — at ~200% zoom in a
+      partial-screen window, horizontal rows overflow and OVERLAP (top-bar Reset
+      vs the brand; section-header right-actions over the left text). Fullscreen
+      is fine. Fix = truncate/elide the left text in those header rows (egui
+      `Label::truncate`) so the right action always has room + tidy/wrap the
+      top-bar cluster; cheap partial = bump the min window width. Low-priority
+      polish (edge case). (S–M)
 - [x] **Bordered text inputs** — visible border on text fields so they don't
       blend into the dark theme — **landed via #38** (the `theme.rs` change),
       app-wide.
