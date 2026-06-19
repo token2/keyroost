@@ -582,8 +582,11 @@ configured (see `packaging/README.md`):
       change-mgmt-key, `f0aa05c`) now route secrets through the modal; the
       offscreen "Management key" card + inline sign-PIN/new-key fields are gone;
       "use default management key" toggle; secrets wiped per op (Approach A,
-      bulk → CLI, documented in `50032c5`). REMAINING: **OpenPGP + OATH** adopt
-      the same shared chrome (cheap). FIDO already modal (#38). (M)
+      bulk → CLI, documented in `50032c5`). **OpenPGP** (`be6d999`: PW1/PW3 change
+      + unblock + all admin-PIN-gated write ops, use-default-PW3) and **OATH**
+      (`ada77e2`: add-credential → modal; unlock stays an inline gate) likewise
+      done. FIDO already modal (#38). **ROLLOUT COMPLETE** — My1's #31 core ask
+      (scroll-independent credential entry + in-place results) delivered app-wide. (M)
 - [x] **UI scale / "Text size" control (issue #42)** — DONE (`ff4597a`): egui
       global zoom — a top-bar slider 80–200% with a live %/Reset, `Ctrl +/−/scroll`
       keyboard zoom, persisted via eframe storage (default 100%, unchanged for
