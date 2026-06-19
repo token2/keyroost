@@ -577,10 +577,13 @@ configured (see `packaging/README.md`):
 - [~] **Credential-entry modal + scroll-independent feedback** — *highest-leverage
       GUI fix, from @My1's #31 follow-up.* Built on #38's `modal_window` (FIDO
       aesthetic), auto-clears, shows the op result IN the modal.
-      DONE (`cd61287`): **PIV Change-PIN / Change-PUK / Unblock-PIN** moved from
-      inline fields to a centered modal (buttons open it). REMAINING: the PIV
-      **management-key** flows (entangled — gates generate/import/sign/etc.), then
-      **OpenPGP + OATH** adopt the same shared chrome. FIDO already modal (#38). (M)
+      **PIV fully done:** Change-PIN/PUK/Unblock-PIN (`cd61287`) + all the
+      management-key-gated ops (generate/import/self-sign/CSR/set-retries/
+      change-mgmt-key, `f0aa05c`) now route secrets through the modal; the
+      offscreen "Management key" card + inline sign-PIN/new-key fields are gone;
+      "use default management key" toggle; secrets wiped per op (Approach A,
+      bulk → CLI, documented in `50032c5`). REMAINING: **OpenPGP + OATH** adopt
+      the same shared chrome (cheap). FIDO already modal (#38). (M)
 - [x] **Bordered text inputs** — visible border on text fields so they don't
       blend into the dark theme — **landed via #38** (the `theme.rs` change),
       app-wide.
