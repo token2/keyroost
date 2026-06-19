@@ -284,7 +284,13 @@ struct OathRow {
     code: Option<String>,
 }
 
-/// "Add credential" form state for the OATH pane.
+/// "Add credential" modal state for the OATH pane. Open iff `open` is true; the
+/// name + base32 **secret** + type/touch fields render *inside* the centered
+/// `modal_window` (not inline in the pane) so the secret entry and its result
+/// stay on-screen, mirroring the PIV/OpenPGP credential modals (issue #31).
+/// `busy` shows the spinner while `provision_oath`'s job is in flight; `result`
+/// is `None` until it completes, then `Ok(())` on success or `Err(message)` on
+/// failure — both shown in the modal.
 #[derive(Default)]
 struct OathAddDialog {
     open: bool,
@@ -294,6 +300,41 @@ struct OathAddDialog {
     /// True = TOTP, false = HOTP.
     totp: bool,
     require_touch: bool,
+    /// True while the provision op is in flight (spinner + Submit disabled).
+    busy: bool,
+    /// Outcome of the last provision op, shown in the modal.
+    result: Option<Result<(), String>>,
+}
+
+impl OathAddDialog {
+    /// A freshly-opened dialog: empty fields, TOTP default, no in-flight op.
+    /// (No `..Default::default()` — the `Drop` impl forbids struct-update.)
+    fn opened() -> Self {
+        OathAddDialog {
+            open: true,
+            name: String::new(),
+            secret: String::new(),
+            totp: true,
+            require_touch: false,
+            busy: false,
+            result: None,
+        }
+    }
+
+    /// Client-side validation of the entered fields, mirroring the guards in
+    /// `provision_oath` so the modal can reject bad input before dispatching.
+    /// Returns the trimmed name + decoded secret on success, or an error message.
+    fn validate(&self) -> Result<(String, Vec<u8>), String> {
+        let name = self.name.trim().to_owned();
+        if name.is_empty() {
+            return Err("credential name is required".into());
+        }
+        match keyroost_proto::codec::base32_decode(self.secret.trim()) {
+            Ok(s) if !s.is_empty() => Ok((name, s)),
+            Ok(_) => Err("secret is empty".into()),
+            Err(e) => Err(format!("invalid base32 secret: {e}")),
+        }
+    }
 }
 
 // The form is replaced wholesale after submit; wipe the typed seed on drop.
@@ -2674,6 +2715,21 @@ impl App {
         // wrong-password, or a transport error must not leave it buffered for
         // an automatic retry against (potentially) a different key.
         wipe(&mut app.oath.password_input);
+        // Mirror the outcome into the add modal when one is in flight (the
+        // provision op routes through here), so success/error shows *in* the
+        // dialog (issue #31) rather than only as a pane-level error line.
+        let modal_busy = app.oath.add.open && app.oath.add.busy;
+        match &result {
+            Ok(_) if modal_busy => app.oath.add.result = Some(Ok(())),
+            Err(TransportError::OathPasswordRejected) if modal_busy => {
+                app.oath.add.result = Some(Err("wrong OATH password".into()));
+            }
+            Err(e) if modal_busy => app.oath.add.result = Some(Err(e.to_string())),
+            _ => {}
+        }
+        if app.oath.add.open {
+            app.oath.add.busy = false;
+        }
         match result {
             Ok(rows) => {
                 app.oath.creds = rows;
@@ -2682,9 +2738,17 @@ impl App {
             }
             Err(TransportError::OathPasswordRejected) => {
                 app.oath.locked = true;
-                app.oath.error = Some("wrong OATH password".into());
+                // The add modal already shows this; don't double-report when it
+                // is the one that failed.
+                if !modal_busy {
+                    app.oath.error = Some("wrong OATH password".into());
+                }
             }
-            Err(e) => app.oath.error = Some(e.to_string()),
+            Err(e) => {
+                if !modal_busy {
+                    app.oath.error = Some(e.to_string());
+                }
+            }
         }
     }
 
@@ -2719,19 +2783,11 @@ impl App {
             self.oath.error = Some("no OATH key selected".into());
             return;
         };
-        let cred_name = self.oath.add.name.trim().to_owned();
-        if cred_name.is_empty() {
-            self.oath.error = Some("credential name is required".into());
-            return;
-        }
-        let secret = match keyroost_proto::codec::base32_decode(self.oath.add.secret.trim()) {
-            Ok(s) if !s.is_empty() => zeroize::Zeroizing::new(s),
-            Ok(_) => {
-                self.oath.error = Some("secret is empty".into());
-                return;
-            }
+        // Validate before dispatch; the modal surfaces the reason on failure.
+        let (cred_name, secret) = match self.oath.add.validate() {
+            Ok((n, s)) => (n, zeroize::Zeroizing::new(s)),
             Err(e) => {
-                self.oath.error = Some(format!("invalid base32 secret: {e}"));
+                self.oath.error = Some(e);
                 return;
             }
         };
@@ -2742,8 +2798,8 @@ impl App {
         };
         let require_touch = self.oath.add.require_touch;
         let password = zeroize::Zeroizing::new(self.oath.password_input.clone());
-        // Clear the form now; on error the message is surfaced separately.
-        self.oath.add = OathAddDialog::default();
+        // The form stays open showing the spinner; it is wiped/closed on the
+        // modal's Done (success) or Cancel/✕/Esc. Do not reset it here.
         self.spawn_job("Adding credential\u{2026}", move || {
             let result = (|| -> Result<Vec<OathRow>, TransportError> {
                 let mut session = Self::oath_open_unlock(&name, &password)?;
@@ -2781,52 +2837,144 @@ impl App {
         });
     }
 
-    /// The inline "Add credential" form, shown when the add dialog is open.
-    fn render_oath_add_form(&mut self, ui: &mut egui::Ui) {
+    /// Close the "Add credential" modal, wiping the typed secret. (`OathAddDialog`
+    /// also wipes on drop; the explicit reset here makes the close-path intent
+    /// clear and mirrors the PIV/OpenPGP `*_cred_modal_close` helpers.)
+    fn oath_add_modal_close(&mut self) {
+        wipe(&mut self.oath.add.secret);
+        self.oath.add = OathAddDialog::default();
+    }
+
+    /// Centered "New credential" modal: the name + base32 **secret** + type/touch
+    /// fields live *inside* the shared `modal_window` chrome (not inline in the
+    /// pane), so the secret entry and its result stay on-screen — matching the
+    /// PIV/OpenPGP credential modals (issue #31). Submit dispatches the unchanged
+    /// `provision_oath`; the outcome is mirrored back via `apply_oath_rows`. The
+    /// secret is wiped on Done/Cancel/✕/Esc.
+    fn render_oath_add_modal(&mut self, ctx: &egui::Context, p: &Palette) {
         if !self.oath.add.open {
             return;
         }
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Add credential").strong());
-                helper_bubble(
-                    ui,
-                    "The secret is sent to the key to store the credential; it is \
-                     not written to disk by keyroost. Use the base32 secret from the \
-                     service's enrollment (the text behind the QR code).",
-                );
-            });
-            ui.horizontal(|ui| {
-                ui.label("Name:");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.oath.add.name)
-                        .hint_text("issuer:account")
-                        .desired_width(220.0),
-                );
-            });
-            ui.horizontal(|ui| {
-                ui.label("Secret (base32):");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.oath.add.secret)
-                        .password(true)
-                        .desired_width(220.0),
-                );
-            });
-            ui.horizontal(|ui| {
-                ui.label("Type:");
-                ui.selectable_value(&mut self.oath.add.totp, true, "TOTP");
-                ui.selectable_value(&mut self.oath.add.totp, false, "HOTP");
-                ui.checkbox(&mut self.oath.add.require_touch, "Require touch");
-            });
-            ui.horizontal(|ui| {
-                if ui.button("Save").clicked() {
-                    self.provision_oath();
+        let busy = self.oath.add.busy;
+        let result = self.oath.add.result.clone();
+
+        let mut want_submit = false;
+        let mut want_close = false;
+
+        let closed = Self::modal_window(ctx, p, "oath_add", "New credential", |ui| {
+            match &result {
+                Some(Ok(())) => {
+                    // Success: confirmation + a single Done that dismisses.
+                    ui.label(
+                        egui::RichText::new("\u{2713} Credential added")
+                            .font(theme::f_sb(13.0))
+                            .color(p.ok),
+                    );
+                    ui.add_space(16.0);
+                    if theme::button(ui, p, BtnKind::Primary, "Done").clicked() {
+                        want_close = true;
+                    }
                 }
-                if ui.button("Cancel").clicked() {
-                    self.oath.add = OathAddDialog::default();
+                _ => {
+                    // Entry form (also the path while busy / after an error so the
+                    // user can retry without losing the dialog).
+                    ui.horizontal(|ui| {
+                        ui.add_sized(
+                            [96.0, 22.0],
+                            egui::Label::new(
+                                egui::RichText::new("Name")
+                                    .font(theme::f_reg(13.0))
+                                    .color(p.txt2),
+                            ),
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.oath.add.name)
+                                .hint_text("issuer:account")
+                                .desired_width(300.0),
+                        );
+                    });
+                    ui.add_space(4.0);
+                    secret_field(
+                        ui,
+                        p,
+                        "Secret",
+                        &mut self.oath.add.secret,
+                        "base32 (behind the QR code)",
+                        300.0,
+                    );
+                    ui.horizontal(|ui| {
+                        ui.add_sized(
+                            [96.0, 22.0],
+                            egui::Label::new(
+                                egui::RichText::new("Type")
+                                    .font(theme::f_reg(13.0))
+                                    .color(p.txt2),
+                            ),
+                        );
+                        ui.selectable_value(&mut self.oath.add.totp, true, "TOTP");
+                        ui.selectable_value(&mut self.oath.add.totp, false, "HOTP");
+                    });
+                    ui.add_space(4.0);
+                    ui.checkbox(&mut self.oath.add.require_touch, "Require touch");
+                    card_note(
+                        ui,
+                        p,
+                        "The secret is sent to the key, not written to disk by keyroost.",
+                    );
+
+                    if let Some(Err(e)) = &result {
+                        ui.add_space(6.0);
+                        ui.colored_label(p.err, e);
+                    }
+
+                    ui.add_space(16.0);
+                    ui.horizontal(|ui| {
+                        if busy {
+                            ui.add(egui::Spinner::new());
+                            ui.label(
+                                egui::RichText::new("Adding credential\u{2026}")
+                                    .font(theme::f_reg(12.5))
+                                    .color(p.txt2),
+                            );
+                        } else {
+                            if theme::button(ui, p, BtnKind::Primary, "Add").clicked() {
+                                want_submit = true;
+                            }
+                            ui.add_space(8.0);
+                            if theme::button(ui, p, BtnKind::Default, "Cancel").clicked() {
+                                want_close = true;
+                            }
+                        }
+                    });
                 }
-            });
+            }
         });
+
+        // ✕ / Esc / Cancel dismiss too, but never yank the dialog out from under
+        // a running op (mirrors the PIV/OpenPGP modals' busy handling).
+        if (closed || want_close) && !busy {
+            self.oath_add_modal_close();
+            return;
+        }
+        if want_submit && !busy {
+            // Mark busy first so the modal shows the spinner this frame; the op
+            // writes the outcome back via `apply_oath_rows`.
+            self.oath.add.busy = true;
+            self.oath.add.result = None;
+            self.oath.error = None;
+            self.provision_oath();
+            // If the op didn't actually queue — the worker was busy (no error
+            // set; retry on the next click) or a client-side guard rejected the
+            // input and stored the reason in `oath.error` — unstick the modal and
+            // surface the guard reason in the dialog rather than the pane.
+            if !self.busy() {
+                let guard_err = self.oath.error.take();
+                self.oath.add.busy = false;
+                if let Some(e) = guard_err {
+                    self.oath.add.result = Some(Err(e));
+                }
+            }
+        }
     }
 
     /// Modal confirmation before deleting a credential (irreversible).
@@ -3659,26 +3807,6 @@ fn kv(ui: &mut egui::Ui, key: &str, value: &str) {
         ui.label(egui::RichText::new(format!("{key}:")).color(ui.visuals().weak_text_color()));
         ui.label(value);
     });
-}
-
-/// The reusable "helper-bubble": a small information glyph that reveals a
-/// plain-English note on hover. Used to disclose, concisely, any choice that
-/// persists data or affects security (here, that naming a key writes its serial
-/// to disk) without cluttering the layout with a wall of text.
-fn helper_bubble(ui: &mut egui::Ui, text: &str) {
-    let d = 15.0;
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(d, d), egui::Sense::hover());
-    let c = ui.visuals().weak_text_color();
-    ui.painter()
-        .circle_stroke(rect.center(), d / 2.0 - 1.0, egui::Stroke::new(1.0, c));
-    ui.painter().text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        "?",
-        egui::FontId::proportional(10.0),
-        c,
-    );
-    resp.on_hover_text(text);
 }
 
 fn hex_short(bytes: &[u8]) -> String {
@@ -5274,6 +5402,7 @@ impl eframe::App for App {
             self.delete_fingerprint(id);
         }
         self.render_oath_delete_confirm(ctx);
+        self.render_oath_add_modal(ctx, &p);
         self.render_openpgp_cred_modal(ctx, &p);
         self.render_piv_confirms(ctx);
         self.render_piv_cred_modal(ctx, &p);
@@ -8579,15 +8708,9 @@ impl App {
             self.help_dot(ui, p, "oath");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if theme::button(ui, p, BtnKind::Primary, "+ Add credential").clicked() {
-                    // No struct-update syntax: OathAddDialog has a Drop impl
-                    // (it wipes the typed seed), which forbids `..Default`.
-                    self.oath.add = OathAddDialog {
-                        open: true,
-                        name: String::new(),
-                        secret: String::new(),
-                        totp: true,
-                        require_touch: false,
-                    };
+                    // Opens the centered "New credential" modal (rendered in the
+                    // update loop alongside the other credential modals).
+                    self.oath.add = OathAddDialog::opened();
                 }
                 ui.add_space(6.0);
                 if theme::button(ui, p, BtnKind::Default, "Refresh").clicked() {
@@ -8600,8 +8723,6 @@ impl App {
             ui.colored_label(p.err, err);
             ui.add_space(6.0);
         }
-        self.render_oath_add_form(ui);
-
         if self.oath.locked {
             theme::card_frame(p).show(ui, |ui| {
                 ui.label(
@@ -9965,6 +10086,79 @@ mod tests {
         let t2 = piv_default_mgmt_key_hex(true);
         assert_eq!(piv_mgmt_key_bytes(t2).unwrap().len(), 24);
         assert_ne!(std, t2);
+    }
+
+    /// `OathAddDialog::validate` trims the name, requires it, base32-decodes the
+    /// secret, and rejects an empty/invalid secret — the same guards the modal's
+    /// Submit relies on before dispatching `provision_oath`.
+    #[test]
+    fn oath_add_dialog_validate() {
+        // Empty name → error, regardless of the secret.
+        let mut d = OathAddDialog::opened();
+        d.name = "  ".into();
+        d.secret = "JBSWY3DPEHPK3PXP".into();
+        assert_eq!(d.validate().unwrap_err(), "credential name is required");
+
+        // Empty secret → error.
+        d.name = "acme:alice".into();
+        d.secret = String::new();
+        assert_eq!(d.validate().unwrap_err(), "secret is empty");
+
+        // Non-base32 secret → "invalid base32 secret: …".
+        d.secret = "not base32!!".into();
+        assert!(d
+            .validate()
+            .unwrap_err()
+            .starts_with("invalid base32 secret"));
+
+        // Valid input → trimmed name + decoded secret bytes.
+        d.name = "  acme:alice  ".into();
+        d.secret = "JBSWY3DPEHPK3PXP".into();
+        let (name, secret) = d.validate().expect("valid");
+        assert_eq!(name, "acme:alice");
+        assert_eq!(
+            secret,
+            keyroost_proto::codec::base32_decode("JBSWY3DPEHPK3PXP").unwrap()
+        );
+        assert!(!secret.is_empty());
+    }
+
+    /// `apply_oath_rows` mirrors the provision outcome into the open add modal
+    /// (busy clears; success → `Ok`, error → `Err(message)`) and does *not*
+    /// double-report into the pane-level `oath.error` while the modal owns the op.
+    #[test]
+    fn apply_oath_rows_mirrors_into_add_modal() {
+        // Success path: modal busy → result Ok, busy cleared, rows applied.
+        let mut app = App::default();
+        app.oath.add = OathAddDialog::opened();
+        app.oath.add.busy = true;
+        App::apply_oath_rows(
+            &mut app,
+            Ok(vec![OathRow {
+                name: "x".into(),
+                code: None,
+            }]),
+        );
+        assert!(!app.oath.add.busy);
+        assert_eq!(app.oath.add.result, Some(Ok(())));
+        assert_eq!(app.oath.creds.len(), 1);
+        assert!(app.oath.error.is_none());
+
+        // Error path: wrong password surfaces in the modal, not the pane.
+        let mut app = App::default();
+        app.oath.add = OathAddDialog::opened();
+        app.oath.add.busy = true;
+        App::apply_oath_rows(&mut app, Err(TransportError::OathPasswordRejected));
+        assert!(!app.oath.add.busy);
+        assert_eq!(app.oath.add.result, Some(Err("wrong OATH password".into())));
+        assert!(app.oath.error.is_none());
+
+        // No modal open: the pane-level error path still works (unlock/refresh).
+        let mut app = App::default();
+        App::apply_oath_rows(&mut app, Err(TransportError::OathPasswordRejected));
+        assert!(!app.oath.add.open);
+        assert!(app.oath.locked);
+        assert_eq!(app.oath.error.as_deref(), Some("wrong OATH password"));
     }
 
     /// With "Use default management key" ticked, `piv_current_mgmt_key` ignores
