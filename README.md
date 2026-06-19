@@ -33,7 +33,11 @@ a short, vendor-neutral tour of what FIDO2, OATH, OpenPGP, and PIV actually do.
 - **PIV (SP 800-73-4)** — full management: status (applet/firmware version,
   serial, PIN retries, which slots 9A/9C/9D/9E hold a certificate), on-card key
   generation, certificate import / export, self-signed certs or a CSR for a CA,
-  and PIN / PUK / management-key changes and applet reset.
+  and PIN / PUK / management-key changes and applet reset. The GUI collects the
+  management key per operation (and wipes it after), which is ideal for a slot or
+  two; for **provisioning many slots or keys, the CLI is the intended path** — the
+  management key and PIN come from env/stdin once, so a shell loop does the batch
+  (see the [PIV guide](https://framefilter.github.io/keyroost/piv.html)).
 - **Token2 Molto2 / Molto2v2** — program a slot from an `otpauth://` URI;
   bulk-import from Aegis (plaintext or encrypted), 2FAS, or a list of `otpauth://`
   URIs; sync the host clock; rotate the customer key; factory reset.
@@ -304,6 +308,17 @@ keyroostctl openpgp sign --in msg.txt --pin-stdin --reader yubikey
 
 # --- PIV (read-only status) ---
 keyroostctl piv status --reader yubikey
+
+# bulk-provision several slots: management key + PIN from env once, loop the rest.
+# (the GUI asks per operation; the CLI is the path for many slots/keys)
+export PIV_MGMT=...   # AES-192 / 3DES management key, hex; never put it in argv
+export PIV_PIN=...
+for slot in 9a 9c 9d 9e; do
+  keyroostctl piv generate-key --slot "$slot" --algorithm eccp256 \
+      --mgmt-key-env PIV_MGMT --reader yubikey
+  keyroostctl piv self-sign --slot "$slot" --subject "CN=$USER" \
+      --mgmt-key-env PIV_MGMT --pin-env PIV_PIN --reader yubikey
+done
 
 # --- Token2 Molto2 (TOTP programming) ---
 keyroostctl molto info

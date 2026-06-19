@@ -101,6 +101,44 @@ keyroostctl piv request-cert --slot 9a --subject "CN=Alice,O=Example" \
     --pin-stdin --file request.csr</code></pre>
   </section>
 
+  <section class="kr-section">
+    <h2>Bulk / scripted provisioning — use the CLI</h2>
+    <p>The desktop app collects the management key (and PIN) <strong>per operation</strong>
+      and wipes the secret from memory as soon as that operation finishes — a deliberate
+      security choice. For a single slot that's ideal. For provisioning <em>several slots</em>,
+      or many keys, re-entering the management key on every step gets tedious fast.</p>
+    <p>For batch work the <strong>CLI is the intended path.</strong> The management key and
+      PIN come from environment variables or stdin <em>once</em>, so a shell loop can
+      provision every slot without re-entry. Keep the secrets out of <code>argv</code> —
+      always use the <code>--mgmt-key-env</code> / <code>--mgmt-key-stdin</code> and
+      <code>--pin-env</code> / <code>--pin-stdin</code> flags (never pass them as plain
+      arguments), so they never appear in your shell history or the process list.</p>
+<pre><code># management key + PIN supplied once via env; the loop provisions each slot.
+# (set these in your own shell; don't commit or echo them)
+export PIV_MGMT=010203040506070801020304050607080102030405060708   # AES-192 / 3DES key, hex
+export PIV_PIN=123456
+
+for slot in 9a 9c 9d 9e; do
+  keyroostctl piv generate-key --slot "$slot" --algorithm eccp256 \
+      --mgmt-key-env PIV_MGMT --reader yubikey
+  keyroostctl piv self-sign --slot "$slot" --subject "CN=$USER" --days 365 \
+      --mgmt-key-env PIV_MGMT --pin-env PIV_PIN --reader yubikey
+done
+
+unset PIV_MGMT PIV_PIN   # clear the secrets when you're done</code></pre>
+    <p>Swap <code>self-sign</code> for <code>request-cert --file slot-$slot.csr</code> if a
+      certificate authority issues your certificates; import each one later with
+      <code>import-cert --slot "$slot" --file …</code>. Use <code>--reader &lt;substr&gt;</code>
+      (or <code>--name</code> with a <a href="naming.html">friendly name</a>) to pin the loop
+      to one device when several are plugged in.</p>
+    <div class="kr-callout note">
+      <div class="kr-callout-title note">One slot? The GUI is fine.</div>
+      <p>None of this replaces the desktop app — provisioning a slot or two there is
+        perfectly comfortable. The CLI just earns its keep when you're scripting many slots
+        or many keys and don't want to re-enter the management key each time.</p>
+    </div>
+  </section>
+
   <section class="kr-section kr-res-section">
     <h2>Authoritative resources</h2>
     <div class="kr-res">
