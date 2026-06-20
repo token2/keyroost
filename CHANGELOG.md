@@ -7,6 +7,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **FIDO2 over NFC readers** — a `CtapTransport` abstraction lets the CTAP
+  command layer run over PC/SC as well as USB-HID, so FIDO2 (getInfo, passkey
+  management) and on-device OTP now work through an NFC reader, not just direct
+  USB. Contact / ISO-7816 chip readers are not yet supported (the contact path
+  is deferred to follow-up; the PC/SC transport is shared, so it's an
+  incremental fix). Contributed by Emin Huseynov / [@token2](https://github.com/token2)
+  ([#44](https://github.com/framefilter/keyroost/pull/44), addressing
+  [#43](https://github.com/framefilter/keyroost/issues/43)).
 - **OpenPGP INTERNAL AUTHENTICATE** — `openpgp authenticate` produces a
   client/SSH authentication signature with the on-card Authentication key
   (PW1 in the "other" context). The Auth key slot is now selectable for
