@@ -305,6 +305,7 @@ keyroostctl oath code <name> --reader yubikey
 # --- OpenPGP card ---
 keyroostctl openpgp status --reader yubikey
 keyroostctl openpgp sign --in msg.txt --pin-stdin --reader yubikey
+keyroostctl openpgp authenticate --in chal.bin --pin-stdin --reader yubikey  # client/SSH auth (Auth key)
 
 # --- PIV (read-only status) ---
 keyroostctl piv status --reader yubikey

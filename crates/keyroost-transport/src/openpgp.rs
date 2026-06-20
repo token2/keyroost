@@ -383,6 +383,17 @@ impl OpenPgpSession {
         Ok(sig)
     }
 
+    /// Produce a client-authentication signature over `auth_input` with the
+    /// on-card Authentication key (INTERNAL AUTHENTICATE). The caller supplies the
+    /// already-hashed PKCS#1 `DigestInfo`. Requires PW1 verified in the "other"
+    /// context ([`keyroost_openpgp::PW1_OTHER`]) first; on a YubiKey it also needs
+    /// a touch. Returns the raw signature bytes.
+    pub fn internal_authenticate(&mut self, auth_input: &[u8]) -> Result<Vec<u8>, TransportError> {
+        let (sig, sw) = self.transmit_full(&pgp::internal_authenticate(auth_input))?;
+        ok_or_apdu("openpgp internal authenticate", sw)?;
+        Ok(sig)
+    }
+
     /// Decrypt an RSA `cryptogram` with the on-card decryption key
     /// (PSO:DECIPHER) and return the recovered plaintext. `cryptogram` is the
     /// raw RSA-encrypted value (for RSA-2048, 256 bytes — e.g. a PKCS#1 v1.5

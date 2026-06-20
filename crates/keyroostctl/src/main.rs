@@ -885,6 +885,31 @@ enum OpenpgpCmd {
         #[arg(long, value_name = "SUBSTR")]
         reader: Option<String>,
     },
+    /// Produce a client/SSH authentication signature with the on-card
+    /// Authentication key (INTERNAL AUTHENTICATE). Hashes the input, wraps it in
+    /// a PKCS#1 DigestInfo, and has the card sign it. Requires the user PIN (PW1)
+    /// and, on a YubiKey, a touch.
+    Authenticate {
+        /// File whose contents to authenticate-sign.
+        #[arg(long, value_name = "FILE")]
+        r#in: std::path::PathBuf,
+        /// Write the raw signature bytes here. Without it, the signature is
+        /// printed as hex to stdout.
+        #[arg(long, value_name = "FILE")]
+        out: Option<std::path::PathBuf>,
+        /// Read the user PIN (PW1) from the named environment variable.
+        #[arg(long, value_name = "VAR", conflicts_with = "pin_stdin")]
+        pin_env: Option<String>,
+        /// Read the user PIN (PW1) from stdin (one line).
+        #[arg(long)]
+        pin_stdin: bool,
+        /// Digest algorithm for the PKCS#1 v1.5 DigestInfo. SHA-256 is the
+        /// modern default; SHA-1 is offered for interop with old verifiers.
+        #[arg(long, value_enum, default_value_t = SignHash::Sha256)]
+        hash: SignHash,
+        #[arg(long, value_name = "SUBSTR")]
+        reader: Option<String>,
+    },
     /// Change the user PIN (PW1). PINs are sourced from env vars or stdin
     /// (stdin reads two consecutive lines: old then new) — never argv.
     ChangePin {
@@ -3805,6 +3830,38 @@ fn run_openpgp(cmd: &OpenpgpCmd, debug: bool) -> Result<(), Box<dyn std::error::
                     );
                 }
                 None => println!("{}", hex_encode(&plain)),
+            }
+        }
+        OpenpgpCmd::Authenticate {
+            r#in,
+            out,
+            pin_env,
+            pin_stdin,
+            hash,
+            reader,
+        } => {
+            let data = std::fs::read(r#in)
+                .map_err(|e| format!("cannot read {}: {}", r#in.display(), e))?;
+            // PKCS#1 v1.5 DigestInfo (SHA-256 by default, SHA-1 on request): the
+            // card wraps it in EMSA padding and RSA-signs it with the Auth key.
+            let digest_info = hash.digest_info(&data);
+            let pin = read_secret("user PIN (PW1)", pin_env.as_deref(), *pin_stdin)?;
+            let mut session = open_openpgp(reader.as_deref(), debug)?;
+            // INTERNAL AUTHENTICATE authorizes under PW1 in the "other" context
+            // (ref 0x82) — the same context as decipher, not the signing context.
+            session.verify_pin(keyroost_openpgp::PW1_OTHER, pin.as_bytes())?;
+            eprintln!(
+                "Authenticating ({}) — touch the key if it blinks…",
+                hash.label()
+            );
+            let sig = session.internal_authenticate(&digest_info)?;
+            match out {
+                Some(path) => {
+                    write_private_file(path, &sig)
+                        .map_err(|e| format!("cannot write {}: {}", path.display(), e))?;
+                    eprintln!("Wrote {} signature bytes to {}", sig.len(), path.display());
+                }
+                None => println!("{}", hex_encode(&sig)),
             }
         }
         OpenpgpCmd::ChangePin {

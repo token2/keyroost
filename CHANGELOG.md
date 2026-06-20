@@ -6,6 +6,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **OpenPGP INTERNAL AUTHENTICATE** — `openpgp authenticate` produces a
+  client/SSH authentication signature with the on-card Authentication key
+  (PW1 in the "other" context). The Auth key slot is now selectable for
+  provisioning too (`openpgp generate --slot auth`, `openpgp import --slot
+  auth`), completing the third OpenPGP key.
+
 ## [0.6.0] - 2026-06-17
 
 ### Added

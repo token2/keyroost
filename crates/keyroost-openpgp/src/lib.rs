@@ -13,10 +13,10 @@
 //!
 //! This is the *byte layer*: it turns intentions into APDU byte vectors and
 //! turns response byte slices into typed structures. It performs **no I/O**.
-//! Card transmit, the `61xx` / `GET RESPONSE` reassembly loop, PIN entry, and
-//! the higher-level key-management operations are deliberately left for the
-//! transport phase; see the `TODO(transport)` notes on [`Instruction`] and the
-//! builders that are intentionally absent.
+//! Card transmit, the `61xx` / `GET RESPONSE` reassembly loop (driven generically
+//! by `transmit_applet` in `keyroost-transport`), PIN entry, and the
+//! higher-level key-management orchestration are deliberately left for the
+//! transport phase; this layer only frames and parses bytes.
 //!
 //! Unlike the OATH applet (Yubico's SIMPLE-TLV, short-form lengths only), the
 //! OpenPGP applet uses ISO 7816-4 **BER-TLV**: two-byte ("high") tags and
@@ -64,9 +64,8 @@ pub enum Instruction {
     /// `PERFORM SECURITY OPERATION` — compute signature (P1P2 `9E9A`, see
     /// [`pso_compute_signature`]) or decipher (P1P2 `8086`, see [`pso_decipher`]).
     PerformSecurityOperation = 0x2A,
-    /// `INTERNAL AUTHENTICATE` — client/SSH authentication signature.
-    ///
-    /// TODO(transport): builder not provided yet.
+    /// `INTERNAL AUTHENTICATE` — client/SSH authentication signature (see
+    /// [`internal_authenticate`]).
     InternalAuthenticate = 0x88,
     /// `GENERATE ASYMMETRIC KEY PAIR` — P1 `80` generate, `81` read public key
     /// (see [`generate_key`], [`read_public_key`]).
@@ -232,8 +231,9 @@ pub fn verify(pw_ref: u8, pin: &[u8]) -> Vec<u8> {
 
 /// `GET RESPONSE` (case-2): retrieve the next chunk after a `61xx` status word.
 ///
-/// TODO(transport): the reassembly loop (transmit, inspect `SW`, repeat) belongs
-/// in `keyroost-transport`; this builder only emits the request APDU.
+/// The reassembly loop (transmit, inspect `SW`, repeat) lives in
+/// `keyroost-transport` (`transmit_applet`), which drives it generically across
+/// applets; this builder only emits the request APDU that loop issues.
 #[must_use]
 pub fn get_response() -> Vec<u8> {
     build_apdu_get(0x00, Instruction::GetResponse.code(), 0x00, 0x00, 0x00)
@@ -387,6 +387,27 @@ pub fn pso_compute_signature(data: &[u8]) -> Vec<u8> {
         Instruction::PerformSecurityOperation.code(),
         (PSO_COMPUTE_SIGNATURE >> 8) as u8,
         (PSO_COMPUTE_SIGNATURE & 0xFF) as u8,
+        data,
+    );
+    apdu.push(0x00); // case-4 Le
+    apdu
+}
+
+/// `INTERNAL AUTHENTICATE` (`00 88 00 00 <Lc> <data> 00`) — produce a
+/// client/SSH authentication signature with the on-card Authentication key.
+///
+/// `data` is the Authentication Input the card signs — for RSA a PKCS#1
+/// `DigestInfo` (DER `AlgorithmIdentifier` + the already-computed hash), as
+/// with [`pso_compute_signature`]; this layer never hashes, it only frames the
+/// bytes. Builds a case-4 APDU; the trailing `0x00` `Le` is appended by hand.
+/// Requires PW1 verified in the "other" context ([`PW1_OTHER`]).
+#[must_use]
+pub fn internal_authenticate(data: &[u8]) -> Vec<u8> {
+    let mut apdu = build_apdu(
+        0x00,
+        Instruction::InternalAuthenticate.code(),
+        0x00,
+        0x00,
         data,
     );
     apdu.push(0x00); // case-4 Le
@@ -1464,6 +1485,14 @@ mod tests {
         assert_eq!(get_response(), vec![0x00, 0xC0, 0x00, 0x00, 0x00]);
     }
 
+    #[test]
+    fn internal_authenticate_is_case4() {
+        assert_eq!(
+            internal_authenticate(&[0xAB, 0xCD]),
+            vec![0x00, 0x88, 0x00, 0x00, 0x02, 0xAB, 0xCD, 0x00]
+        );
+    }
+
     // --- BER-TLV: tags ---------------------------------------------------
 
     #[test]
@@ -1948,6 +1977,7 @@ mod tests {
         assert_eq!(Instruction::GetResponse.code(), 0xC0);
         assert_eq!(Instruction::GenerateAsymmetricKeyPair.code(), 0x47);
         assert_eq!(Instruction::PerformSecurityOperation.code(), 0x2A);
+        assert_eq!(Instruction::InternalAuthenticate.code(), 0x88);
         assert_eq!(Instruction::ChangeReferenceData.code(), 0x24);
         assert_eq!(GENERATE_KEY, 0x80);
         assert_eq!(READ_PUBLIC_KEY, 0x81);
