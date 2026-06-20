@@ -655,11 +655,20 @@ their detailed design follows #38 landing.
       Fixes the glibc-version portability caveat; wrinkle is `libpcsclite`
       linking for the PC/SC path. Think it through before committing.
 
-### E. OpenPGP transport completeness (code `TODO(transport)`)
-- [ ] `INTERNAL AUTHENTICATE` builder (client/SSH auth signature) — not provided
-      yet (`keyroost-openpgp` lib.rs).
-- [ ] `GET RESPONSE` reassembly loop for `61xx`-chunked responses — belongs in
-      `keyroost-transport`; the byte layer only emits the request APDU today.
+### E. OpenPGP transport completeness (code `TODO(transport)`) — **COMPLETE**
+- [x] `INTERNAL AUTHENTICATE` (client/SSH auth signature) — **DONE end-to-end**
+      (`032a300`): byte builder `internal_authenticate()` (case-4 `00 88 00 00
+      <Lc> <data> 00`, KAT) + transport `OpenPgpSession::internal_authenticate()`
+      + CLI `openpgp authenticate --in/--out --hash --pin-*` (PW1 in the *other*
+      context `0x82`, `--out` via `write_private_file` 0600) + Auth slot already
+      exposed for `generate-key`/`import-key`. **HARDWARE-VERIFIED on YubiKey 5.7**
+      (2026-06-19): generated an RSA-2048 Auth key, signed a message, and the sig
+      validates against the slot pubkey (PKCS#1 v1.5 block ending in the SHA-256
+      DigestInfo). Both old `TODO(transport)` markers retired.
+- [x] `GET RESPONSE` reassembly loop for `61xx`-chunked responses — **was already
+      DONE** in `keyroost-transport` (`transmit_applet` drives it generically for
+      every applet; secret-sticky). Only the stale byte-layer pointer comment
+      remained; corrected in `032a300`.
 
 ### F. Token2 PIN+ standards applets — issue #23 (experimental)
 - [ ] Verify OATH/OpenPGP/PIV over CCID on a real PIN+ key to lift the
