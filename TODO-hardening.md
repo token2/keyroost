@@ -815,3 +815,17 @@ multi-agent review:
       crate), a dep-policy decision. Token2 frames their notes as a generic
       "scratchpad, not for secrets" (no use case); Nitrokey's largeBlob support
       is unreleased. Design separately when picked up.
+- [ ] **UI liveness / "the app is working" feedback** — make it obvious to the
+      eye that keyroost is *busy*, not *frozen/bugged*, during blocking work.
+      Card I/O routinely stalls the visible UI for seconds — touch-required ops
+      (sign/decrypt/authenticate, key-gen), on-card RSA generation, the ~30s
+      reset re-insert window, PC/SC enumeration — and a static frame reads as a
+      hang. Today there's a worker thread + a spinner on imports, but it's
+      inconsistent and easy to miss. Figure out a coherent activity language:
+      e.g. a global "working…" indicator while the device worker is busy,
+      per-action inline spinners/disabled+busy button states, a subtle motion or
+      progress cue on long ops, and a heartbeat so the window never looks dead.
+      Keep it tasteful (over-animation reads as cheap/AI-generated — see the
+      frontend-design notes). Research what feels alive vs. annoying before
+      building. (Raised after the v0.7.0 GUI-polish pass; user considers the pane
+      redesign itself done enough to gather community feedback.)
