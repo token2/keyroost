@@ -22,8 +22,9 @@ pub struct Help {
 }
 
 /// Look up help content by topic id. Topic ids (use these as the `?` keys):
-///   device, fido2, pin, passkeys, oath, pgp, piv, molto, custkey, reset,
-///   piv-generate, piv-certificate, piv-import, piv-export, piv-delete, piv-admin
+///   device, fido2, pin, passkeys, oath, pgp, pgp-keys, pgp-card-details, piv,
+///   molto, custkey, reset, piv-generate, piv-certificate, piv-import,
+///   piv-export, piv-delete, piv-admin
 pub fn help(topic: &str) -> Option<&'static Help> {
     Some(match topic {
         "device" => &Help {
@@ -80,6 +81,16 @@ pub fn help(topic: &str) -> Option<&'static Help> {
             title: "OpenPGP",
             body: "Turns the key into a smart card for encrypting & signing email and files (and for SSH). The private keys live on the card and never touch your computer's disk.",
             slug: "/openpgp",
+        },
+        "pgp-keys" => &Help {
+            title: "Generate or import a key",
+            body: "Each of the three keys \u{2014} signature, decryption, authentication \u{2014} can be created right on the card, or imported from an RSA-2048 file you already have. Either way OVERWRITES whatever was in that key, and the only way to clear it again is a full reset. You'll need the admin PIN, and the key may ask for a touch.",
+            slug: "/openpgp#keys",
+        },
+        "pgp-card-details" => &Help {
+            title: "Cardholder name & URL",
+            body: "Optional labels stored on the card: the cardholder name and a web address where your public key can be found. They're public information, but writing them still needs the admin PIN.",
+            slug: "/openpgp#card-details",
         },
         "piv" => &Help {
             title: "PIV smart card",

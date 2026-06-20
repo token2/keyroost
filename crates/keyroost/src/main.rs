@@ -365,10 +365,10 @@ struct OpenPgpState {
     name_input: String,
     /// Public-key-URL entry.
     url_input: String,
-    /// Slot selected in the generate-key control.
-    gen_slot: OpenPgpSlotSel,
-    /// Slot selected in the import-key control.
-    import_slot: OpenPgpSlotSel,
+    /// The key (Signature / Decryption / Authentication) whose sub-tab is open.
+    /// Every per-key action — generate on-card, import — targets this key, the
+    /// same way the PIV pane's `selected_slot` drives its per-slot cards.
+    selected_key: OpenPgpSlotSel,
     /// Path to an RSA key file for import-from-file (text-entered).
     import_path: String,
     /// Change-user-PIN (PW1) old/new entries. Cleared after use.
@@ -584,11 +584,21 @@ impl OpenPgpSlotSel {
             OpenPgpSlotSel::Auth => "authentication",
         }
     }
-    fn from_label(s: &str) -> Self {
-        match s {
-            "decryption" => OpenPgpSlotSel::Decrypt,
-            "authentication" => OpenPgpSlotSel::Auth,
-            _ => OpenPgpSlotSel::Sign,
+    /// Capitalized tab label for the sub-tab strip (mirrors PIV slot tabs).
+    fn tab_label(self) -> &'static str {
+        match self {
+            OpenPgpSlotSel::Sign => "Signature",
+            OpenPgpSlotSel::Decrypt => "Decryption",
+            OpenPgpSlotSel::Auth => "Authentication",
+        }
+    }
+    /// This key's algorithm id and fingerprint out of an `OpenPgpStatus`,
+    /// so the per-key state line can read directly from the selected key.
+    fn status_fields(self, st: &keyroost_transport::OpenPgpStatus) -> (Option<u8>, &[u8; 20]) {
+        match self {
+            OpenPgpSlotSel::Sign => (st.sig_algo_id, &st.fingerprint_sig),
+            OpenPgpSlotSel::Decrypt => (st.dec_algo_id, &st.fingerprint_dec),
+            OpenPgpSlotSel::Auth => (st.aut_algo_id, &st.fingerprint_aut),
         }
     }
 }
@@ -3456,7 +3466,7 @@ impl App {
             return true; // nothing to do; let the modal close
         };
         let pin = zeroize::Zeroizing::new(self.openpgp_admin_pin_value());
-        let slot = self.openpgp.gen_slot;
+        let slot = self.openpgp.selected_key;
         let creation_time = unix_now();
         self.openpgp.notice = None;
         self.spawn_job("Generating key… (touch the key if it blinks)", move || {
@@ -3495,7 +3505,7 @@ impl App {
             return true; // nothing to do; let the modal close
         };
         let pin = zeroize::Zeroizing::new(self.openpgp_admin_pin_value());
-        let slot = self.openpgp.import_slot;
+        let slot = self.openpgp.selected_key;
         let path = self.openpgp.import_path.clone();
         let creation_time = unix_now();
         self.openpgp.notice = None;
@@ -3649,188 +3659,6 @@ impl App {
         });
     }
 
-    /// Write-operations section: cardholder name / URL, generate / import key,
-    /// PIN changes, reset. Every admin-PIN (PW3)-gated write and every PIN change
-    /// now opens the credential modal (`render_openpgp_cred_modal`) to collect
-    /// its secret(s); only the *non-secret* parameters (name, URL, slot, file
-    /// path) stay inline here. Reset is the exception (it blocks the PINs itself,
-    /// so it needs no PIN) but routes through the modal for a uniform look.
-    fn render_openpgp_manage(&mut self, ui: &mut egui::Ui, p: &Palette) {
-        // The kind to open the credential modal for, collected inside the UI
-        // closures and applied afterwards so a submit method's `&mut self` never
-        // overlaps the card's borrow.
-        let mut open_modal: Option<OpenPgpCredKind> = None;
-
-        let head = |ui: &mut egui::Ui, t: &str| card_head(ui, p, t);
-        let sub = |ui: &mut egui::Ui, t: &str| card_sub(ui, p, t);
-        let note = |ui: &mut egui::Ui, t: &str| card_note(ui, p, t);
-
-        // --- Card details: cardholder name + public-key URL ---
-        theme::card_frame(p).show(ui, |ui| {
-            head(ui, "Card details");
-            note(
-                ui,
-                "Setting either prompts for the admin PIN (PW3) in a dialog.",
-            );
-            ui.add_space(6.0);
-            text_field(
-                ui,
-                p,
-                "Name",
-                &mut self.openpgp.name_input,
-                "Surname<<Given",
-                200.0,
-            );
-            ui.horizontal(|ui| {
-                if theme::button(ui, p, BtnKind::Default, "Set name\u{2026}").clicked() {
-                    open_modal = Some(OpenPgpCredKind::SetName);
-                }
-            });
-            ui.add_space(6.0);
-            text_field(
-                ui,
-                p,
-                "URL",
-                &mut self.openpgp.url_input,
-                "https://\u{2026}",
-                240.0,
-            );
-            ui.horizontal(|ui| {
-                if theme::button(ui, p, BtnKind::Default, "Set URL\u{2026}").clicked() {
-                    open_modal = Some(OpenPgpCredKind::SetUrl);
-                }
-            });
-        });
-        ui.add_space(10.0);
-
-        // --- Keys: generate on-card / import per slot (both overwrite) ---
-        theme::card_frame(p).show(ui, |ui| {
-            head(ui, "Keys");
-            note(
-                ui,
-                "Generating or importing OVERWRITES that slot (clearable only by a \
-                 full reset). Prompts for the admin PIN; may need a touch.",
-            );
-            ui.add_space(8.0);
-            sub(ui, "Generate on-card");
-            if let Some(s) = theme::segmented(
-                ui,
-                p,
-                &["signature", "decryption", "authentication"],
-                self.openpgp.gen_slot.label(),
-                p.accent,
-            ) {
-                self.openpgp.gen_slot = OpenPgpSlotSel::from_label(&s);
-            }
-            ui.add_space(2.0);
-            ui.horizontal(|ui| {
-                if theme::button(ui, p, BtnKind::Default, "Generate\u{2026}").clicked() {
-                    open_modal = Some(OpenPgpCredKind::GenerateKey);
-                }
-            });
-            ui.add_space(10.0);
-            sub(ui, "Import RSA-2048");
-            if let Some(s) = theme::segmented(
-                ui,
-                p,
-                &["signature", "decryption", "authentication"],
-                self.openpgp.import_slot.label(),
-                p.accent,
-            ) {
-                self.openpgp.import_slot = OpenPgpSlotSel::from_label(&s);
-            }
-            let mut browse_import_key = false;
-            ui.horizontal(|ui| {
-                text_field(
-                    ui,
-                    p,
-                    "From file",
-                    &mut self.openpgp.import_path,
-                    "/path/to/key.pem (PKCS#1/8, PEM or DER)",
-                    260.0,
-                );
-                browse_import_key =
-                    theme::button(ui, p, BtnKind::Default, "Browse\u{2026}").clicked();
-            });
-            if browse_import_key {
-                self.spawn_file_dialog(
-                    FileTarget::OpenpgpImport,
-                    false,
-                    &[("Keys", &["pem", "der", "key"]), ("All files", &["*"])],
-                    None,
-                );
-            }
-            let have_path = !self.openpgp.import_path.trim().is_empty();
-            ui.horizontal(|ui| {
-                if theme::button(ui, p, BtnKind::Default, "Generate & import\u{2026}").clicked() {
-                    open_modal = Some(OpenPgpCredKind::GenerateImportKey);
-                }
-                if theme::button(ui, p, BtnKind::Default, "Import file\u{2026}").clicked()
-                    && have_path
-                {
-                    open_modal = Some(OpenPgpCredKind::ImportKeyFile);
-                }
-            });
-        });
-        ui.add_space(10.0);
-
-        // --- PINs: change user / admin, unblock user ---
-        theme::card_frame(p).show(ui, |ui| {
-            head(ui, "PINs");
-            note(
-                ui,
-                "Each opens a dialog for the PIN entry. The current and new PINs \
-                 are typed there, not here.",
-            );
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if theme::button(ui, p, BtnKind::Default, "Change user PIN\u{2026}").clicked() {
-                    open_modal = Some(OpenPgpCredKind::ChangeUserPin);
-                }
-                if theme::button(ui, p, BtnKind::Default, "Change admin PIN\u{2026}").clicked() {
-                    open_modal = Some(OpenPgpCredKind::ChangeAdminPin);
-                }
-                if theme::button(ui, p, BtnKind::Default, "Unblock user PIN\u{2026}").clicked() {
-                    open_modal = Some(OpenPgpCredKind::UnblockUserPin);
-                }
-            });
-        });
-        ui.add_space(10.0);
-
-        // --- Danger: factory reset ---
-        theme::card_frame(p)
-            .stroke(egui::Stroke::new(1.0, theme::tint(p.err, 90)))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("Reset applet")
-                            .font(theme::f_sb(14.0))
-                            .color(p.err),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if theme::button(ui, p, BtnKind::Danger, "Reset applet\u{2026}").clicked() {
-                            open_modal = Some(OpenPgpCredKind::Reset);
-                        }
-                    });
-                });
-                ui.label(
-                    egui::RichText::new(
-                        "Wipes ALL OpenPGP keys and restores default PINs. Works even if the PINs are forgotten.",
-                    )
-                    .font(theme::f_reg(12.0))
-                    .color(p.txt2),
-                );
-            });
-
-        // Open the chosen flow's credential modal, wiping any stale secret first
-        // so a PIN typed for a previous flow can't ride along.
-        if let Some(kind) = open_modal {
-            self.openpgp.wipe_secrets();
-            self.openpgp.error = None;
-            self.openpgp.cred_modal = Some(OpenPgpCredModal::new(kind));
-        }
-    }
-
     /// The reset confirmation modal for the PIV pane.
     fn render_piv_confirms(&mut self, ctx: &egui::Context) {
         if typed_reset_modal(
@@ -3916,15 +3744,6 @@ fn algo_id_label(id: Option<u8>) -> &'static str {
     }
 }
 
-/// Render a 20-byte fingerprint, or "(no key)" when the slot is all-zero.
-fn fpr_label(fpr: &[u8; 20]) -> String {
-    if fpr.iter().all(|&b| b == 0) {
-        "(no key)".to_string()
-    } else {
-        hex_lower(fpr)
-    }
-}
-
 /// Lowercase hex of a byte slice.
 fn hex_lower(bytes: &[u8]) -> String {
     keyroost_proto::codec::hex_encode(bytes)
@@ -3948,13 +3767,6 @@ fn piv_default_mgmt_key_hex(is_token2: bool) -> &'static str {
     } else {
         "010203040506070801020304050607080102030405060708"
     }
-}
-
-fn kv(ui: &mut egui::Ui, key: &str, value: &str) {
-    ui.horizontal_wrapped(|ui| {
-        ui.label(egui::RichText::new(format!("{key}:")).color(ui.visuals().weak_text_color()));
-        ui.label(value);
-    });
 }
 
 fn hex_short(bytes: &[u8]) -> String {
@@ -5034,17 +4846,6 @@ fn secret_field(ui: &mut egui::Ui, p: &Palette, label: &str, buf: &mut String, h
         );
     });
     ui.add_space(4.0);
-}
-
-/// Section heading inside a management card (shared by the OpenPGP and PIV
-/// panes).
-fn card_head(ui: &mut egui::Ui, p: &Palette, t: &str) {
-    ui.label(egui::RichText::new(t).font(theme::f_sb(14.0)).color(p.txt));
-}
-
-/// Sub-heading inside a management card.
-fn card_sub(ui: &mut egui::Ui, p: &Palette, t: &str) {
-    ui.label(egui::RichText::new(t).font(theme::f_sb(12.5)).color(p.txt2));
 }
 
 /// Fine-print note inside a management card.
@@ -9184,87 +8985,350 @@ impl App {
 
     /// OpenPGP tab — read-only status + the existing management section.
     fn cap_pgp(&mut self, ui: &mut egui::Ui, p: &Palette) {
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new("OpenPGP")
-                    .font(theme::f_sb(14.5))
-                    .color(p.txt),
-            );
+        // Intents collected inside the UI closures and applied afterwards, so a
+        // submit method's `&mut self` never overlaps a card's borrow. (Mirrors
+        // the PIV pane.) `open_modal` carries the chosen credential flow.
+        let mut do_refresh = false;
+        let mut open_modal: Option<OpenPgpCredKind> = None;
+        let mut browse_import_key = false;
+        // The key the user clicked in the sub-tab strip this frame (applied
+        // after the card borrows end). `selected` is a copy of the active key so
+        // the immutable card closures can compare without borrowing self.
+        let mut clicked_key: Option<OpenPgpSlotSel> = None;
+        let selected = self.openpgp.selected_key;
+
+        let note = |ui: &mut egui::Ui, t: &str| card_note(ui, p, t);
+
+        // --- OpenPGP card status card (full-width, FIDO2 shape): title + help
+        // left, Read status right, applet-wide status body, then the applet-wide
+        // admin (Card details, PINs) folded in as setting-rows.
+        theme::card_frame(p).show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("OpenPGP card")
+                        .font(theme::f_sb(14.5))
+                        .color(p.txt),
+                );
+                ui.add_space(6.0);
+                self.help_dot(ui, p, "pgp");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::button(ui, p, BtnKind::Default, "Read status").clicked() {
+                        do_refresh = true;
+                    }
+                });
+            });
+            ui.add_space(8.0);
+            if let Some(err) = &self.openpgp.error {
+                ui.colored_label(p.err, err);
+                ui.add_space(6.0);
+            }
+            if let Some(notice) = &self.openpgp.notice {
+                ui.colored_label(p.ok, notice);
+                ui.add_space(6.0);
+            }
+            // Applet-wide status: AID / serial / PIN retries / signatures made.
+            // The three per-key algorithm+fingerprint rows live under the sub-tab
+            // strip now, not here.
+            if let Some(status) = &self.openpgp.status {
+                let serial = status
+                    .serial()
+                    .map_or("\u{2014}".to_string(), |s| format!("{s} (0x{s:08X})"));
+                let sigs = status
+                    .signature_count
+                    .map_or("\u{2014}".to_string(), |n| n.to_string());
+                ui.label(
+                    egui::RichText::new(format!(
+                        "AID {} \u{00B7} Serial {serial}",
+                        hex_lower(&status.aid)
+                    ))
+                    .font(theme::f_reg(12.5))
+                    .color(p.txt2),
+                );
+                ui.add_space(2.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "PIN retries PW1={} RC={} PW3={} \u{00B7} Signatures made {sigs}",
+                        status.tries_pw1, status.tries_rc, status.tries_pw3
+                    ))
+                    .font(theme::f_reg(12.5))
+                    .color(p.txt2),
+                );
+            } else if self.openpgp.error.is_none() {
+                ui.label(
+                    egui::RichText::new("Click Read status to read this card (no PIN or touch).")
+                        .font(theme::f_reg(13.0))
+                        .color(p.txt3),
+                );
+            }
+
+            // Applet-wide administration folded in as FIDO2 setting-rows: the
+            // cardholder details and the PIN operations apply to the whole card,
+            // not to one key, so they sit with the applet status here.
+            ui.add_space(12.0);
+
+            // Card details: cardholder name + public-key URL. The values are
+            // typed in the per-row text fields; both writes prompt for the admin
+            // PIN (PW3) in a dialog.
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Card details")
+                        .font(theme::f_sb(13.5))
+                        .color(p.txt),
+                );
+                ui.add_space(6.0);
+                self.help_dot(ui, p, "pgp-card-details");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::button(ui, p, BtnKind::Default, "Set URL\u{2026}").clicked() {
+                        open_modal = Some(OpenPgpCredKind::SetUrl);
+                    }
+                    ui.add_space(6.0);
+                    if theme::button(ui, p, BtnKind::Default, "Set name\u{2026}").clicked() {
+                        open_modal = Some(OpenPgpCredKind::SetName);
+                    }
+                });
+            });
             ui.add_space(6.0);
-            self.help_dot(ui, p, "pgp");
+            text_field(
+                ui,
+                p,
+                "Name",
+                &mut self.openpgp.name_input,
+                "Surname<<Given",
+                200.0,
+            );
+            ui.add_space(4.0);
+            text_field(
+                ui,
+                p,
+                "URL",
+                &mut self.openpgp.url_input,
+                "https://\u{2026}",
+                240.0,
+            );
+
+            // PINs: change user / admin, unblock user. Each opens a dialog where
+            // the PIN entry happens; nothing secret is typed inline.
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("PINs")
+                        .font(theme::f_sb(13.5))
+                        .color(p.txt),
+                );
+                ui.add_space(6.0);
+                self.help_dot(ui, p, "pin");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::button(ui, p, BtnKind::Default, "Unblock user PIN\u{2026}").clicked()
+                    {
+                        open_modal = Some(OpenPgpCredKind::UnblockUserPin);
+                    }
+                    ui.add_space(6.0);
+                    if theme::button(ui, p, BtnKind::Default, "Change admin PIN\u{2026}").clicked()
+                    {
+                        open_modal = Some(OpenPgpCredKind::ChangeAdminPin);
+                    }
+                    ui.add_space(6.0);
+                    if theme::button(ui, p, BtnKind::Default, "Change user PIN\u{2026}").clicked() {
+                        open_modal = Some(OpenPgpCredKind::ChangeUserPin);
+                    }
+                });
+            });
+        });
+
+        // --- Selected-key display data (shown under the key tab strip) -------
+        // The active key's algorithm + fingerprint, read straight off the loaded
+        // status. Precomputed here so the immutable card closures don't borrow
+        // self.
+        let sel_state: String = match &self.openpgp.status {
+            Some(st) => {
+                let (algo, fpr) = selected.status_fields(st);
+                if fpr.iter().all(|&b| b == 0) {
+                    "no key".to_string()
+                } else {
+                    format!("{} \u{00B7} fpr {}", algo_id_label(algo), hex_lower(fpr))
+                }
+            }
+            None => "read status to view this key".to_string(),
+        };
+
+        // --- Key sub-tab strip ----------------------------------------------
+        // Signature / Decryption / Authentication, each a tab exactly like the
+        // FIDO2 sub-tab strip: an opaque surface strip behind a row of bold
+        // labels, the active one underlined with a 2px accent. Clicking a tab
+        // selects that key; the Generate / Import cards below target it.
+        ui.add_space(14.0);
+        {
+            let top = ui.cursor().top();
+            let strip = egui::Rect::from_min_max(
+                egui::pos2(ui.max_rect().left(), top - 4.0),
+                egui::pos2(ui.max_rect().right(), top + 30.0),
+            );
+            ui.painter().rect_filled(strip, 0.0, p.surface);
+        }
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 20.0;
+            for key in [
+                OpenPgpSlotSel::Sign,
+                OpenPgpSlotSel::Decrypt,
+                OpenPgpSlotSel::Auth,
+            ] {
+                let active = selected == key;
+                let color = if active { p.txt } else { p.txt3 };
+                let resp = ui
+                    .add(
+                        egui::Label::new(
+                            egui::RichText::new(key.tab_label())
+                                .font(theme::f_sb(13.5))
+                                .color(color),
+                        )
+                        .sense(egui::Sense::click()),
+                    )
+                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                if active {
+                    let y = resp.rect.bottom() + 6.0;
+                    ui.painter().line_segment(
+                        [
+                            egui::pos2(resp.rect.left(), y),
+                            egui::pos2(resp.rect.right(), y),
+                        ],
+                        egui::Stroke::new(2.0, p.accent),
+                    );
+                }
+                if resp.clicked() {
+                    clicked_key = Some(key);
+                }
+            }
+        });
+
+        // --- Selected key content (single column under the strip) -----------
+        ui.add_space(14.0);
+        ui.label(
+            egui::RichText::new(format!("State: {}", &sel_state))
+                .font(theme::f_reg(12.5))
+                .color(p.txt2),
+        );
+        ui.add_space(10.0);
+        theme::card_frame(p).show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+
+            // Generate on-card: label + help left, Generate pinned right.
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Generate on-card")
+                        .font(theme::f_sb(13.5))
+                        .color(p.txt),
+                );
+                ui.add_space(6.0);
+                self.help_dot(ui, p, "pgp-keys");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::button(ui, p, BtnKind::Default, "Generate\u{2026}").clicked() {
+                        open_modal = Some(OpenPgpCredKind::GenerateKey);
+                    }
+                });
+            });
+            note(
+                ui,
+                "Generating OVERWRITES this key (clearable only by a full reset). \
+                 Prompts for the admin PIN; touch the key if it blinks.",
+            );
+
+            ui.add_space(12.0);
+            // Import RSA-2048: file path + Browse left, the two import actions
+            // pinned right.
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Import RSA-2048")
+                        .font(theme::f_sb(13.5))
+                        .color(p.txt),
+                );
+                ui.add_space(6.0);
+                self.help_dot(ui, p, "pgp-keys");
+            });
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                text_field(
+                    ui,
+                    p,
+                    "From file",
+                    &mut self.openpgp.import_path,
+                    "/path/to/key.pem (PKCS#1/8, PEM or DER)",
+                    240.0,
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    browse_import_key =
+                        theme::button(ui, p, BtnKind::Default, "Browse\u{2026}").clicked();
+                });
+            });
+            let have_path = !self.openpgp.import_path.trim().is_empty();
+            ui.add_space(6.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if theme::button(ui, p, BtnKind::Default, "Read status").clicked() {
-                    self.load_openpgp_status();
+                if theme::button(ui, p, BtnKind::Default, "Import file\u{2026}").clicked()
+                    && have_path
+                {
+                    open_modal = Some(OpenPgpCredKind::ImportKeyFile);
+                }
+                ui.add_space(6.0);
+                if theme::button(ui, p, BtnKind::Default, "Generate & import\u{2026}").clicked() {
+                    open_modal = Some(OpenPgpCredKind::GenerateImportKey);
                 }
             });
         });
         ui.add_space(12.0);
-        if let Some(err) = &self.openpgp.error {
-            ui.colored_label(p.err, err);
-            ui.add_space(6.0);
-        }
-        if let Some(notice) = &self.openpgp.notice {
-            ui.colored_label(p.ok, notice);
-            ui.add_space(6.0);
-        }
-        if let Some(status) = &self.openpgp.status {
-            theme::card_frame(p).show(ui, |ui| {
-                kv(ui, "AID", &hex_lower(&status.aid));
-                if let Some(serial) = status.serial() {
-                    kv(ui, "Serial", &format!("{serial} (0x{serial:08X})"));
-                }
-                kv(
-                    ui,
-                    "Signature key",
-                    &format!(
-                        "{}  {}",
-                        algo_id_label(status.sig_algo_id),
-                        fpr_label(&status.fingerprint_sig)
-                    ),
-                );
-                kv(
-                    ui,
-                    "Decryption key",
-                    &format!(
-                        "{}  {}",
-                        algo_id_label(status.dec_algo_id),
-                        fpr_label(&status.fingerprint_dec)
-                    ),
-                );
-                kv(
-                    ui,
-                    "Authentication key",
-                    &format!(
-                        "{}  {}",
-                        algo_id_label(status.aut_algo_id),
-                        fpr_label(&status.fingerprint_aut)
-                    ),
-                );
-                kv(
-                    ui,
-                    "PIN retries",
-                    &format!(
-                        "PW1={} RC={} PW3={}",
-                        status.tries_pw1, status.tries_rc, status.tries_pw3
-                    ),
-                );
-                kv(
-                    ui,
-                    "Signatures made",
-                    &status
-                        .signature_count
-                        .map_or("(unavailable)".to_string(), |n| n.to_string()),
+
+        // Reset applet — its own destructive card with a red stroke at the
+        // bottom of the pane (mirrors the FIDO2 / PIV "Reset" card), full width,
+        // description left + red button right.
+        theme::card_frame(p)
+            .stroke(egui::Stroke::new(1.0, theme::tint(p.err, 90)))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Reset applet")
+                            .font(theme::f_sb(14.5))
+                            .color(p.err),
+                    );
+                    ui.add_space(6.0);
+                    self.help_dot(ui, p, "reset");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if theme::button(ui, p, BtnKind::Danger, "Reset applet\u{2026}").clicked() {
+                            open_modal = Some(OpenPgpCredKind::Reset);
+                        }
+                    });
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "Wipes ALL OpenPGP keys and restores default PINs. Works even if \
+                         the PINs are forgotten.",
+                    )
+                    .font(theme::f_reg(12.5))
+                    .color(p.txt2),
                 );
             });
-        } else {
-            ui.label(
-                egui::RichText::new("Click Read status to read this card (no PIN or touch).")
-                    .font(theme::f_reg(13.0))
-                    .color(p.txt3),
+
+        // Apply collected intents now that the card borrows have ended.
+        if let Some(key) = clicked_key {
+            self.openpgp.selected_key = key;
+        }
+        if do_refresh {
+            self.load_openpgp_status();
+        }
+        if browse_import_key {
+            self.spawn_file_dialog(
+                FileTarget::OpenpgpImport,
+                false,
+                &[("Keys", &["pem", "der", "key"]), ("All files", &["*"])],
+                None,
             );
         }
-        ui.add_space(10.0);
-        self.render_openpgp_manage(ui, p);
+        // Open the chosen flow's credential modal, wiping any stale secret first
+        // so a PIN typed for a previous flow can't ride along.
+        if let Some(kind) = open_modal {
+            self.openpgp.wipe_secrets();
+            self.openpgp.error = None;
+            self.openpgp.cred_modal = Some(OpenPgpCredModal::new(kind));
+        }
     }
 
     /// PIV tab — read-only status snapshot (auto-read on first view).
