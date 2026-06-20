@@ -9,8 +9,9 @@ name: Linux bundles (AppImage + Flatpak)
 #   * flatpak  — builds io.github.framefilter.keyroost from the manifest, then:
 #                  - attaches a single-file keyroost.flatpak BUNDLE to the release
 #                    (offline / one-off install), and
-#                  - publishes the OSTree repo to GitHub Pages under docs/flatpak/
-#                    (the auto-update remote).
+#                  - publishes the OSTree repo to the dedicated repo
+#                    framefilter/keyroost-flatpak (its own Pages = the auto-update
+#                    remote), via the FLATPAK_REPO_TOKEN secret.
 #
 # This is a SEPARATE workflow from release.yml / publish.yml by design — it never
 # edits those. It runs in parallel with release.yml on the same tag; the upload
@@ -32,12 +33,13 @@ name: Linux bundles (AppImage + Flatpak)
 #      ASCII-armored PRIVATE key) and FLATPAK_GPG_KEY_ID. When unset, the repo is
 #      published UNSIGNED and the signing steps no-op cleanly (see the guard
 #      pattern below, mirrored from publish.yml).
-#   4. Leave GitHub Pages on its current "Deploy from a branch" source (the
-#      branch that serves docs/). This workflow git-pushes the OSTree tree into
-#      docs/flatpak/ on that branch; it deliberately does NOT use
-#      actions/deploy-pages, which would switch the Pages source to "GitHub
-#      Actions" and take over the whole site (clobbering the Learn site at the
-#      repo root). See the "publish-pages" step for the rationale.
+#   4. Create the dedicated repo framefilter/keyroost-flatpak (one initial commit),
+#      enable its Pages (Deploy from a branch, / root), place the static descriptors
+#      (keyroost.flatpakrepo + icon) in its root, and add a fine-grained PAT scoped
+#      to that repo as the FLATPAK_REPO_TOKEN secret. A separate repo because this
+#      repo's main requires verified-signed commits a CI bot can't make; this keeps
+#      the Learn site (this repo's docs/) untouched. When the token is unset, the
+#      OSTree publish skips cleanly (the .flatpak bundle still attaches).
 
 on:
   push:
