@@ -574,6 +574,13 @@ configured (see `packaging/README.md`):
       cert / Import / Export / Delete, all acting on that slot. `PivState` lost
       `gen/certify/cert/export/del_slot`, gained `selected_slot` +
       `PivSlotSel::from_slot`. GUI eyeball (row hit-testing) left for the user.
+      **UX revision (`f748ce0`, user feedback):** two-column master/detail (slots
+      left / actions right) claiming the real width; full-width slot click targets
+      with generous padding; selection = tint + 3px accent left bar + brighter text
+      (confusing ▸ marker removed); verbose notes → `?` help bubbles (`help.rs`
+      gained `piv-generate/-certificate/-import/-export/-delete/-admin`); all
+      applet-wide ops (PIN&PUK, retries, mgmt-key, reset) consolidated under one
+      "Card administration" section (fixes the floating reset + scattered order).
 - [x] Key/cert deletion — **Option B.** BACKEND DONE (`952c8f4`): byte layer
       (`delete_key` → `00 F6 FF <ref>`, `clear_certificate` = empty PUT DATA, KATs)
       + transport (version-gated `delete_key` ≥5.7, `clear_certificate`) + CLI
