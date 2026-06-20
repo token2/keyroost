@@ -26,8 +26,7 @@ name: Linux bundles (AppImage + Flatpak)
 #
 # ONE-TIME MAINTAINER SETUP required before this produces working bundles:
 #   1. Icon — DONE: the dark-on-amber set is committed in packaging/icons/.
-#   2. Fill in the pcsc-lite sha256 in the Flatpak manifest (REQUIRED — flatpak
-#      refuses to build with the REPLACE_WITH_REAL_SHA256 placeholder).
+#   2. pcsc-lite sha256 — DONE: 2.3.0 (.tar.xz) is pinned + hashed in the manifest.
 #   3. (Optional, recommended) Add repo-signing secrets FLATPAK_GPG_KEY (the
 #      ASCII-armored PRIVATE key) and FLATPAK_GPG_KEY_ID. When unset, the repo is
 #      published UNSIGNED and the signing steps no-op cleanly (see the guard

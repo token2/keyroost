@@ -25,21 +25,19 @@ bundles automatically.
    remote: copy the SVG into the `keyroost-flatpak` repo root as `keyroost-icon.svg`
    — setup step 3.)
 
-2. **pcsc-lite sha256 (REQUIRED).** Pin the pcsc-lite client-lib tarball in
-   `packaging/flatpak/io.github.framefilter.keyroost.yml`. The `sha256:` is a
-   `REPLACE_WITH_REAL_SHA256` placeholder (the upstream host could not be reached
-   from the build environment to compute it). On a machine that can reach
-   `pcsclite.apdu.fr`:
+2. **pcsc-lite sha256 — DONE.** The manifest pins **pcsc-lite 2.3.0** (`.tar.xz`)
+   with its verified sha256 (`1acca22d…060d3d`). To bump later, pick a newer
+   release from <https://pcsclite.apdu.fr/files/> and recompute:
 
    ```bash
-   ver=2.3.0   # pick the release you want; update the url version too
-   curl -fsSLO "https://pcsclite.apdu.fr/files/pcsc-lite-${ver}.tar.bz2"
-   sha256sum "pcsc-lite-${ver}.tar.bz2"
+   ver=2.5.1   # latest at time of writing
+   curl -fsSLO "https://pcsclite.apdu.fr/files/pcsc-lite-${ver}.tar.xz"
+   sha256sum "pcsc-lite-${ver}.tar.xz"
    ```
 
-   `flatpak-builder` refuses to build until the sha256 matches, so this can never
-   ship wrong. Also confirm the client-only `./configure` flags on the chosen
-   version (flag names drift across pcsc-lite 1.9/2.x).
+   `flatpak-builder` refuses to build unless the sha256 matches. If bumping major
+   series, re-confirm the client-only `./configure` flags (they drift across
+   pcsc-lite versions).
 
 3. **Auto-update repo `framefilter/keyroost-flatpak` (REQUIRED for the
    auto-update remote).** The OSTree repo is hosted in a **dedicated** repo, NOT
@@ -128,7 +126,7 @@ applets need a running **host `pcscd`** (every target talks to the host daemon).
 - **cargo-sources.json** is generated on the runner each build from `Cargo.lock`
   (never committed, never stale). Verified June 2026: the generator yields 414
   crate archives + checksums, all from `static.crates.io`.
-- **pcsc-lite sha256** is a placeholder — see setup step 2.
+- **pcsc-lite sha256** is pinned (2.3.0) — see setup step 2.
 - **OSTree history growth:** the `keyroost-flatpak` repo accumulates OSTree
   objects over releases. Prune (`flatpak build-update-repo --prune`) periodically
   if it nears GitHub Pages' soft ~1 GB guidance.

@@ -59,17 +59,12 @@ modules:
       - --disable-documentation
     sources:
       - type: archive
-        # TODO(maintainer): pin the exact pcsc-lite release you intend to ship and
-        # fill in its sha256. The upstream file host (pcsclite.apdu.fr) could not be
-        # reached from the build/research environment to compute the hash, so it is
-        # left as a placeholder. To compute it on a machine that can reach the host:
-        #   ver=2.3.0   # pick the release you want
-        #   curl -fsSLO "https://pcsclite.apdu.fr/files/pcsc-lite-${ver}.tar.bz2"
-        #   sha256sum "pcsc-lite-${ver}.tar.bz2"
-        # then update both the url version and the sha256 below. flatpak-builder
-        # WILL refuse to build until the sha256 matches, so this cannot ship wrong.
-        url: https://pcsclite.apdu.fr/files/pcsc-lite-2.3.0.tar.bz2
-        sha256: REPLACE_WITH_REAL_SHA256
+        # pcsc-lite 2.3.0 (upstream ships .tar.xz; verified + hashed 2026-06-20).
+        # To bump: pick a newer release from https://pcsclite.apdu.fr/files/ and
+        #   curl -fsSLO "https://pcsclite.apdu.fr/files/pcsc-lite-<ver>.tar.xz" && sha256sum it.
+        # flatpak-builder refuses to build unless the sha256 matches.
+        url: https://pcsclite.apdu.fr/files/pcsc-lite-2.3.0.tar.xz
+        sha256: 1acca22d2891d43ffe6d782740d32e78150d4fcc99e8a3cc763abaf546060d3d
     # We only need the libpcsclite client .so; the daemon (pcscd) is the host's.
     cleanup:
       - /bin/pcscd
