@@ -752,8 +752,16 @@ their detailed design follows #38 landing.
       `fido reset` to recover when convenient.
 
 ### H. Protocol confirmation
-- [ ] Confirm the Molto2 `read_info` 3-byte preamble + 2-byte separator are
-      constant (docs/PROTOCOL.md) — the `keyroostctl probe` work item.
+- [x] Confirm the Molto2 `read_info` 3-byte preamble + 2-byte separator —
+      **HARDWARE-VERIFIED 2026-06-20** on a Molto2 (serial 826658711763730) via
+      `keyroostctl --debug molto info`. Response `95 36 02 0F 38…30 11 04 6A 36
+      B6 6D … 90 00`: bytes 0-2 = 3-byte preamble, `info[3]`=0x0F = serial length
+      (15), bytes 4-18 = serial ASCII, bytes 19-20 = `11 04` 2-byte separator,
+      bytes 21-24 = `6A 36 B6 6D` = UTC epoch (BE u32). Both the serial AND the
+      device clock (1781970541) decoded correctly → all three offsets are right
+      on real hardware. No code change. (NB: Molto2 CCID enumeration is flaky at
+      the libccid/USB layer — needed a pcscd rescan; that's environmental, not a
+      keyroost bug.)
 
 ### I. Docs — README protocols/standards section (issue #41)
 - [x] DONE (`e278f8c`): added a "Standards & protocols" README section (verified
