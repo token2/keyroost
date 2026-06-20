@@ -745,26 +745,24 @@ struct PivState {
     retries_pin: u8,
     retries_puk: u8,
     retries_pin_auth: String,
-    /// Key-generation slot + algorithm selectors.
-    gen_slot: PivSlotSel,
+    /// The slot every key/certificate action targets. Chosen once by clicking a
+    /// row in the status card (issue #31): the "Keys & certificates" section is
+    /// slot-first now, so Generate / Create cert / Import / Export / Delete all
+    /// act on this single selection instead of each carrying its own dropdown.
+    selected_slot: PivSlotSel,
+    /// Key-generation algorithm selector.
     gen_alg: PivKeyAlgSel,
-    /// Slot the Delete certificate / Delete key actions target (chosen in the
-    /// pane before the confirming modal opens, mirroring `gen_slot`).
-    del_slot: PivSlotSel,
     /// PEM of the most recently generated public key, shown for copying.
     gen_pubkey_pem: Option<String>,
-    /// Certificate import slot + file path.
-    cert_slot: PivSlotSel,
+    /// Certificate import file path.
     cert_path: String,
-    /// Certificate export slot + destination path.
-    export_slot: PivSlotSel,
+    /// Certificate export destination path.
     export_path: String,
     /// New management key (hex) + algorithm for a management-key rotation.
     new_mgmt_key_input: String,
     new_mgmt_alg: PivMgmtAlgSel,
-    /// Certificate creation: slot, subject (bare name or full DN), validity,
-    /// the PIN that authorizes the on-card signature, and the CSR destination.
-    certify_slot: PivSlotSel,
+    /// Certificate creation: subject (bare name or full DN), validity, the PIN
+    /// that authorizes the on-card signature, and the CSR destination.
     cert_subject: String,
     cert_days: u32,
     sign_pin: String,
@@ -819,17 +817,13 @@ impl Default for PivState {
             retries_pin: 3,
             retries_puk: 3,
             retries_pin_auth: String::new(),
-            gen_slot: PivSlotSel::default(),
+            selected_slot: PivSlotSel::default(),
             gen_alg: PivKeyAlgSel::default(),
-            del_slot: PivSlotSel::default(),
             gen_pubkey_pem: None,
-            cert_slot: PivSlotSel::default(),
             cert_path: String::new(),
-            export_slot: PivSlotSel::default(),
             export_path: String::new(),
             new_mgmt_key_input: String::new(),
             new_mgmt_alg: PivMgmtAlgSel::default(),
-            certify_slot: PivSlotSel::default(),
             cert_subject: String::new(),
             cert_days: 365,
             sign_pin: String::new(),
@@ -859,15 +853,19 @@ impl PivSlotSel {
             PivSlotSel::CardAuth => keyroost_piv::Slot::CardAuthentication,
         }
     }
+    /// Reverse of `to_slot`: map a `keyroost_piv::Slot` back to the GUI
+    /// selector. Used to set the active slot from a clicked status-card row.
+    fn from_slot(slot: keyroost_piv::Slot) -> Self {
+        match slot {
+            keyroost_piv::Slot::Authentication => PivSlotSel::Auth,
+            keyroost_piv::Slot::Signature => PivSlotSel::Sign,
+            keyroost_piv::Slot::KeyManagement => PivSlotSel::KeyMgmt,
+            keyroost_piv::Slot::CardAuthentication => PivSlotSel::CardAuth,
+        }
+    }
     fn label(self) -> &'static str {
         self.to_slot().label()
     }
-    const ALL: [PivSlotSel; 4] = [
-        PivSlotSel::Auth,
-        PivSlotSel::Sign,
-        PivSlotSel::KeyMgmt,
-        PivSlotSel::CardAuth,
-    ];
 }
 
 /// PIV key-generation algorithm selector.
@@ -4408,7 +4406,7 @@ impl App {
                 return;
             }
         };
-        let slot = self.piv.gen_slot.to_slot();
+        let slot = self.piv.selected_slot.to_slot();
         let alg = self.piv.gen_alg.to_alg();
         self.piv.notice = None;
         self.piv.gen_pubkey_pem = None;
@@ -4469,7 +4467,7 @@ impl App {
                 return;
             }
         };
-        let slot = self.piv.cert_slot.to_slot();
+        let slot = self.piv.selected_slot.to_slot();
         let path = self.piv.cert_path.trim().to_owned();
         self.piv.notice = None;
         self.spawn_job("Importing certificate\u{2026}", move || {
@@ -4493,7 +4491,7 @@ impl App {
         });
     }
 
-    /// Delete (clear) the certificate in the selected `del_slot`. The private
+    /// Delete (clear) the certificate in the selected slot. The private
     /// key, if any, is left intact. Management-key authorized; works on every
     /// PIV card. Mirrors `piv_import_cert`'s shape: open → authenticate → call
     /// the transport method → re-read status (so the slot's cert state updates).
@@ -4508,7 +4506,7 @@ impl App {
                 return;
             }
         };
-        let slot = self.piv.del_slot.to_slot();
+        let slot = self.piv.selected_slot.to_slot();
         self.piv.notice = None;
         self.spawn_job("Deleting certificate\u{2026}", move || {
             let result = (|| -> Result<keyroost_transport::PivStatus, TransportError> {
@@ -4530,7 +4528,7 @@ impl App {
         });
     }
 
-    /// Permanently delete (erase) the private key in the selected `del_slot`.
+    /// Permanently delete (erase) the private key in the selected slot.
     /// Management-key authorized. Needs YubiKey firmware 5.7+; the transport
     /// version-gates and surfaces `PivFirmwareTooOld` as the error on older
     /// cards (the pane also hides the button below 5.7 — this is the backstop).
@@ -4545,7 +4543,7 @@ impl App {
                 return;
             }
         };
-        let slot = self.piv.del_slot.to_slot();
+        let slot = self.piv.selected_slot.to_slot();
         self.piv.notice = None;
         self.spawn_job("Deleting key\u{2026}", move || {
             let result = (|| -> Result<keyroost_transport::PivStatus, TransportError> {
@@ -4595,7 +4593,7 @@ impl App {
             return;
         };
         let pin = zeroize::Zeroizing::new(self.piv.sign_pin.clone());
-        let slot = self.piv.certify_slot.to_slot();
+        let slot = self.piv.selected_slot.to_slot();
         let days = i64::from(self.piv.cert_days.max(1));
         self.piv.notice = None;
         self.spawn_job(
@@ -4645,7 +4643,7 @@ impl App {
             return;
         }
         let pin = zeroize::Zeroizing::new(self.piv.sign_pin.clone());
-        let slot = self.piv.certify_slot.to_slot();
+        let slot = self.piv.selected_slot.to_slot();
         self.piv.notice = None;
         self.spawn_job(
             "Signing certificate request\u{2026} (touch if it blinks)",
@@ -4681,7 +4679,7 @@ impl App {
         let Some(name) = self.selected_oath_reader() else {
             return;
         };
-        let slot = self.piv.export_slot.to_slot();
+        let slot = self.piv.selected_slot.to_slot();
         let path = self.piv.export_path.trim().to_owned();
         if path.is_empty() {
             self.piv.error = Some("enter a destination path for the certificate".into());
@@ -5142,16 +5140,6 @@ fn text_field(ui: &mut egui::Ui, p: &Palette, label: &str, buf: &mut String, hin
 }
 
 /// A PIV slot picker combo.
-fn piv_slot_combo(ui: &mut egui::Ui, id: &str, sel: &mut PivSlotSel) {
-    egui::ComboBox::from_id_salt(id)
-        .selected_text(sel.label())
-        .show_ui(ui, |ui| {
-            for opt in PivSlotSel::ALL {
-                ui.selectable_value(sel, opt, opt.label());
-            }
-        });
-}
-
 /// A PIV key-algorithm picker combo.
 fn piv_keyalg_combo(ui: &mut egui::Ui, id: &str, sel: &mut PivKeyAlgSel) {
     egui::ComboBox::from_id_salt(id)
@@ -8729,7 +8717,7 @@ impl App {
                             card_note(ui, p, "Enter the current key, then the new key.");
                         }
                         PivCredKind::DeleteCert => {
-                            let slot = self.piv.del_slot.label();
+                            let slot = self.piv.selected_slot.label();
                             ui.colored_label(
                                 p.err,
                                 egui::RichText::new(format!(
@@ -8743,7 +8731,7 @@ impl App {
                             card_note(ui, p, "The management key authorizes the deletion.");
                         }
                         PivCredKind::DeleteKey => {
-                            let slot = self.piv.del_slot.label();
+                            let slot = self.piv.selected_slot.label();
                             ui.colored_label(
                                 p.err,
                                 egui::RichText::new(format!(
@@ -9303,6 +9291,11 @@ impl App {
         let mut open_delete_key = false;
         let mut arm_reset = false;
         let mut copy_pem: Option<String> = None;
+        // Slot the user clicked in the status card this frame (applied after the
+        // card borrows end). `selected` is a copy of the active selection so the
+        // immutable card closures can compare against it without borrowing self.
+        let mut clicked_slot: Option<PivSlotSel> = None;
+        let selected = self.piv.selected_slot;
 
         let sub = |ui: &mut egui::Ui, t: &str| card_sub(ui, p, t);
         let note = |ui: &mut egui::Ui, t: &str| card_note(ui, p, t);
@@ -9353,10 +9346,19 @@ impl App {
                         .map_or("\u{2014}".to_string(), |n| n.to_string()),
                 );
                 ui.add_space(6.0);
-                // One row per slot: name, a state pill (cert / key only /
-                // empty), and the key algorithm when GET METADATA reports it.
-                // `slot_keys` and `st.slots` are both in canonical slot order,
-                // so the algorithm is looked up by matching the slot.
+                ui.label(
+                    egui::RichText::new("Slots")
+                        .font(theme::f_sb(12.5))
+                        .color(p.txt3),
+                );
+                ui.add_space(2.0);
+                // One clickable row per slot (issue #31, slot-first): name, a
+                // state pill (cert / key only / empty), and the key algorithm
+                // when GET METADATA reports it. Clicking a row sets the active
+                // slot that every action below targets; the selected row gets a
+                // leading marker and a tinted background. `slot_keys` and
+                // `st.slots` are both in canonical slot order, so the algorithm
+                // is looked up by matching the slot.
                 for slot in &st.slots {
                     let entry = slot_keys.iter().find(|(s, _, _)| *s == slot.slot);
                     let alg = entry.and_then(|(_, a, _)| *a);
@@ -9368,37 +9370,83 @@ impl App {
                     } else {
                         ("empty", p.txt3)
                     };
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 5.0;
-                        ui.label(
-                            egui::RichText::new(slot.slot.label())
-                                .font(theme::f_reg(12.5))
-                                .color(p.txt2),
+                    let sel = PivSlotSel::from_slot(slot.slot);
+                    let is_sel = sel == selected;
+                    // The whole row (name + pills + any DN) is one click target.
+                    // Reserve a background shape slot first, then render the row
+                    // inside a group so its bounding rect covers every line; we
+                    // fill that reserved slot behind the content afterwards so
+                    // the selected tint sits *under* the text, not over it.
+                    let bg_idx = ui.painter().add(egui::Shape::Noop);
+                    let resp = ui
+                        .scope(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 5.0;
+                                ui.label(
+                                    egui::RichText::new(if is_sel {
+                                        "\u{25B8}"
+                                    } else {
+                                        "\u{2009}"
+                                    })
+                                    .font(theme::f_sb(12.5))
+                                    .color(p.accent),
+                                );
+                                ui.label(
+                                    egui::RichText::new(slot.slot.label())
+                                        .font(theme::f_reg(12.5))
+                                        .color(if is_sel { p.txt } else { p.txt2 }),
+                                );
+                                theme::pill(ui, state, tint, p.raised2);
+                                if let Some(a) = alg {
+                                    theme::pill(ui, a.label(), p.txt2, p.raised2);
+                                }
+                            });
+                            // Subject DN under the row when a certificate carried
+                            // one. Truncate hard so a long DN can't blow out the
+                            // card.
+                            if let Some(dn) = subject {
+                                let shown = if dn.chars().count() > 64 {
+                                    let mut s: String = dn.chars().take(63).collect();
+                                    s.push('\u{2026}');
+                                    s
+                                } else {
+                                    dn.to_string()
+                                };
+                                ui.horizontal(|ui| {
+                                    ui.add_space(18.0);
+                                    ui.label(
+                                        egui::RichText::new(shown)
+                                            .font(theme::f_reg(11.5))
+                                            .color(p.txt3),
+                                    )
+                                    .on_hover_text(dn);
+                                });
+                            }
+                        })
+                        .response
+                        .interact(egui::Sense::click())
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    // Fill the reserved background slot behind the row content
+                    // with a selected-tint (active) or a faint hover wash.
+                    let bg = if is_sel {
+                        theme::tint(p.accent, 26)
+                    } else if resp.hovered() {
+                        theme::tint(p.txt2, 14)
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    };
+                    if bg != egui::Color32::TRANSPARENT {
+                        ui.painter().set(
+                            bg_idx,
+                            egui::epaint::RectShape::filled(
+                                resp.rect.expand2(egui::vec2(4.0, 2.0)),
+                                4.0,
+                                bg,
+                            ),
                         );
-                        theme::pill(ui, state, tint, p.raised2);
-                        if let Some(a) = alg {
-                            theme::pill(ui, a.label(), p.txt2, p.raised2);
-                        }
-                    });
-                    // Subject DN under the row when a certificate carried one.
-                    // Truncate hard so a very long DN can't blow out the card.
-                    if let Some(dn) = subject {
-                        let shown = if dn.chars().count() > 64 {
-                            let mut s: String = dn.chars().take(63).collect();
-                            s.push('\u{2026}');
-                            s
-                        } else {
-                            dn.to_string()
-                        };
-                        ui.horizontal(|ui| {
-                            ui.add_space(4.0);
-                            ui.label(
-                                egui::RichText::new(shown)
-                                    .font(theme::f_reg(11.5))
-                                    .color(p.txt3),
-                            )
-                            .on_hover_text(dn);
-                        });
+                    }
+                    if resp.clicked() {
+                        clicked_slot = Some(sel);
                     }
                 }
             });
@@ -9452,7 +9500,54 @@ impl App {
         });
         ui.add_space(6.0);
 
-        // --- Keys & certificates ---
+        // --- Keys & certificates (slot-first: act on the selected slot) ---
+        // Precompute the selected slot's display data so the detail panel can
+        // show its state without re-borrowing `self.piv.status` inside the
+        // closure that also needs `&mut self.piv` for the action fields.
+        let sel_label = selected.label();
+        let sel_state: String = {
+            let sel_slot = selected.to_slot();
+            let cert_present = self
+                .piv
+                .status
+                .as_ref()
+                .and_then(|s| s.slots.iter().find(|sl| sl.slot == sel_slot))
+                .map(|sl| sl.cert_present)
+                .unwrap_or(false);
+            let entry = self.piv.slot_keys.iter().find(|(s, _, _)| *s == sel_slot);
+            let alg = entry.and_then(|(_, a, _)| *a);
+            let dn = entry.and_then(|(_, _, d)| d.as_deref());
+            let base = if cert_present {
+                "certificate present"
+            } else if alg.is_some() {
+                "key present, no certificate"
+            } else {
+                "empty"
+            };
+            let mut s = base.to_string();
+            if let Some(a) = alg {
+                s.push_str(" \u{00B7} ");
+                s.push_str(a.label());
+            }
+            if let Some(dn) = dn {
+                s.push_str(" \u{00B7} ");
+                if dn.chars().count() > 64 {
+                    s.extend(dn.chars().take(63));
+                    s.push('\u{2026}');
+                } else {
+                    s.push_str(dn);
+                }
+            }
+            s
+        };
+        // Key deletion (Yubico MOVE/DELETE KEY) needs firmware 5.7+. The
+        // transport version-gates as a backstop; here we hide the button (and
+        // explain) when the loaded status reports an older — or unknown —
+        // version. Clearing a certificate works everywhere.
+        let can_delete_key = matches!(
+            self.piv.status.as_ref().and_then(|s| s.version),
+            Some(v) if v >= (5, 7, 0)
+        );
         egui::CollapsingHeader::new(
             egui::RichText::new("Keys & certificates")
                 .font(theme::f_sb(13.5))
@@ -9462,6 +9557,37 @@ impl App {
         .default_open(true)
         .show(ui, |ui| {
             theme::card_frame(p).show(ui, |ui| {
+                // Detail panel header: which slot every action below targets.
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Selected:")
+                            .font(theme::f_reg(12.5))
+                            .color(p.txt3),
+                    );
+                    ui.label(
+                        egui::RichText::new(sel_label)
+                            .font(theme::f_sb(13.5))
+                            .color(p.txt),
+                    );
+                });
+                note(
+                    ui,
+                    "Pick a slot in the list above; every action here acts on it.",
+                );
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("State")
+                            .font(theme::f_reg(12.5))
+                            .color(p.txt2),
+                    );
+                    ui.label(
+                        egui::RichText::new(&sel_state)
+                            .font(theme::f_reg(12.5))
+                            .color(p.txt2),
+                    );
+                });
+                ui.add_space(8.0);
+
                 sub(ui, "Generate key pair");
                 note(
                     ui,
@@ -9469,7 +9595,6 @@ impl App {
                      public key. The management key is entered in the dialog.",
                 );
                 ui.horizontal(|ui| {
-                    piv_slot_combo(ui, "piv-gen-slot", &mut self.piv.gen_slot);
                     piv_keyalg_combo(ui, "piv-gen-alg", &mut self.piv.gen_alg);
                     if theme::button(ui, p, BtnKind::Default, "Generate\u{2026}").clicked() {
                         open_generate = true;
@@ -9498,9 +9623,6 @@ impl App {
                      self-signed import, the management key) is entered in the \
                      dialog.",
                 );
-                ui.horizontal(|ui| {
-                    piv_slot_combo(ui, "piv-certify-slot", &mut self.piv.certify_slot);
-                });
                 text_field(
                     ui,
                     p,
@@ -9556,9 +9678,6 @@ impl App {
                     "PEM or DER X.509 file. The management key is entered in the \
                      dialog.",
                 );
-                ui.horizontal(|ui| {
-                    piv_slot_combo(ui, "piv-cert-slot", &mut self.piv.cert_slot);
-                });
                 let mut browse_cert = false;
                 ui.horizontal(|ui| {
                     text_field(
@@ -9589,9 +9708,6 @@ impl App {
                 ui.add_space(10.0);
                 sub(ui, "Export certificate");
                 note(ui, "Writes the slot's certificate as DER. No PIN needed.");
-                ui.horizontal(|ui| {
-                    piv_slot_combo(ui, "piv-export-slot", &mut self.piv.export_slot);
-                });
                 let mut save_export = false;
                 ui.horizontal(|ui| {
                     text_field(
@@ -9624,19 +9740,10 @@ impl App {
                 note(
                     ui,
                     "Removes the certificate, or permanently erases the private \
-                     key, in the chosen slot. The management key is entered in the \
-                     dialog. This cannot be undone.",
-                );
-                // Key deletion (Yubico MOVE/DELETE KEY) needs firmware 5.7+. The
-                // transport version-gates as a backstop; here we hide the button
-                // (and explain) when the loaded status reports an older — or
-                // unknown — version. Clearing a certificate works everywhere.
-                let can_delete_key = matches!(
-                    self.piv.status.as_ref().and_then(|s| s.version),
-                    Some(v) if v >= (5, 7, 0)
+                     key, in the selected slot. The management key is entered in \
+                     the dialog. This cannot be undone.",
                 );
                 ui.horizontal(|ui| {
-                    piv_slot_combo(ui, "piv-del-slot", &mut self.piv.del_slot);
                     if theme::button(ui, p, BtnKind::Default, "Delete certificate\u{2026}")
                         .clicked()
                     {
@@ -9736,6 +9843,9 @@ impl App {
             });
 
         // Apply collected intents now that the card borrows have ended.
+        if let Some(slot) = clicked_slot {
+            self.piv.selected_slot = slot;
+        }
         if do_refresh {
             self.load_piv_status();
         }
