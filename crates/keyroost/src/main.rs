@@ -5426,7 +5426,16 @@ impl eframe::App for App {
             // and has not committed to the context yet.
             Some(_) => {
                 if self.zoom_pending.is_none() {
-                    self.zoom = theme::clamp_zoom(ctx.zoom_factor());
+                    // Ctrl +/- and Ctrl-scroll use egui's built-in keyboard zoom,
+                    // which ignores our 80–200% slider bounds. If it ran past the
+                    // limit, pull the context back to the clamp so the keyboard
+                    // path obeys the same range as the slider (issue #42).
+                    let live = ctx.zoom_factor();
+                    let clamped = theme::clamp_zoom(live);
+                    if (live - clamped).abs() > f32::EPSILON {
+                        ctx.set_zoom_factor(clamped);
+                    }
+                    self.zoom = clamped;
                     self.applied_zoom = Some(self.zoom);
                     // The zoom only lands here once it's committed to the
                     // context (slider release, Ctrl +/-/scroll, or Reset), never
@@ -5732,11 +5741,29 @@ impl App {
             .zoom_pending
             .unwrap_or_else(|| theme::clamp_zoom(ui.ctx().zoom_factor()));
 
-        // Live percentage readout (rightmost).
-        ui.label(
-            egui::RichText::new(format!("{}%", (factor * 100.0).round() as i32))
-                .font(theme::f_sb(12.0))
-                .color(p.txt2),
+        // Live percentage readout (rightmost). FIXED width: as the value crosses
+        // 99%→100% the glyph count goes 3→4; in the bar's right-to-left layout a
+        // wider readout would shove the slider track left under the cursor and
+        // make the value lurch (issue #42). `allocate_exact_size` reserves the
+        // widest readout's box unconditionally (unlike `allocate_ui_with_layout`,
+        // which advances by content width and so would still let the track move);
+        // we then paint the value right-aligned inside it, so the slider geometry
+        // is identical for "99%" and "100%".
+        let pct = (factor * 100.0).round() as i32;
+        let cell = ui.fonts(|f| {
+            f.layout_no_wrap("888%".to_owned(), theme::f_sb(12.0), p.txt2)
+                .size()
+        });
+        let (rrect, _) = ui.allocate_exact_size(
+            egui::vec2(cell.x.ceil(), cell.y.ceil()),
+            egui::Sense::hover(),
+        );
+        ui.painter().text(
+            rrect.right_center(),
+            egui::Align2::RIGHT_CENTER,
+            format!("{pct}%"),
+            theme::f_sb(12.0),
+            p.txt2,
         );
         ui.add_space(6.0);
 
