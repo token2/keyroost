@@ -16,10 +16,10 @@ to `linuxdeploy --icon-file`. The filename stem **must** stay the app-id
 `io.github.framefilter.keyroost` (Flatpak / AppStream / desktop-file icon
 resolution keys on it).
 
-The **alternate colorway** — amber-on-dark (amber glyph on the dark surface,
-matching the in-app title-bar mark) — is kept for reference in
-[`docs/app_icons/`](../../docs/app_icons/) along with the original design bundle.
-To switch colorways, replace these files from that set.
+An **alternate colorway** also exists — amber-on-dark (amber glyph on the dark
+surface, matching the in-app title-bar mark). It plus the original design bundle
+were kept out of the published tree; recover them from git history (the commit
+that added `docs/app_icons/`) to switch colorways.
 
 For the auto-update Flatpak remote, also place a copy of the SVG in the **root**
 of the `framefilter/keyroost-flatpak` repo as `keyroost-icon.svg` (see

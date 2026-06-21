@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-20
+
 ### Added
 - **FIDO2 over NFC readers** — a `CtapTransport` abstraction lets the CTAP
   command layer run over PC/SC as well as USB-HID, so FIDO2 (getInfo, passkey
@@ -320,7 +322,8 @@ multi-vendor hardware-security-key manager, then took its neutral name. Highligh
   external dependencies are `pcsc`, `clap`, `eframe`/`egui`, `serde`, and
   (for RSA keygen/parsing) `rsa`/`rand`.
 
-[Unreleased]: https://github.com/framefilter/keyroost/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/framefilter/keyroost/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/framefilter/keyroost/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/framefilter/keyroost/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/framefilter/keyroost/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/framefilter/keyroost/compare/v0.4.0...v0.5.0
