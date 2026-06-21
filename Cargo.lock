@@ -1653,7 +1653,7 @@ dependencies = [
 
 [[package]]
 name = "keyroost"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "arboard",
  "base64",
@@ -1681,7 +1681,7 @@ dependencies = [
 
 [[package]]
 name = "keyroost-ctap"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "aes",
  "cbc",
@@ -1696,14 +1696,14 @@ dependencies = [
 
 [[package]]
 name = "keyroost-hid"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "hidapi",
 ]
 
 [[package]]
 name = "keyroost-import"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "aes-gcm",
  "base64",
@@ -1717,7 +1717,7 @@ dependencies = [
 
 [[package]]
 name = "keyroost-keyring"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1725,32 +1725,32 @@ dependencies = [
 
 [[package]]
 name = "keyroost-oath"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "keyroost-proto",
 ]
 
 [[package]]
 name = "keyroost-openpgp"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "keyroost-proto",
 ]
 
 [[package]]
 name = "keyroost-piv"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "keyroost-proto",
 ]
 
 [[package]]
 name = "keyroost-proto"
-version = "0.7.0"
+version = "0.7.1"
 
 [[package]]
 name = "keyroost-qr"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "jpeg-decoder",
  "keyroost-import",
@@ -1761,7 +1761,7 @@ dependencies = [
 
 [[package]]
 name = "keyroost-resolve"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "keyroost-hid",
  "keyroost-keyring",
@@ -1771,7 +1771,7 @@ dependencies = [
 
 [[package]]
 name = "keyroost-rsakey"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "rand",
  "rsa",
@@ -1780,7 +1780,7 @@ dependencies = [
 
 [[package]]
 name = "keyroost-token2otp"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "aes",
  "cbc",
@@ -1792,7 +1792,7 @@ dependencies = [
 
 [[package]]
 name = "keyroost-transport"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "aes",
  "cipher",
@@ -1812,7 +1812,7 @@ dependencies = [
 
 [[package]]
 name = "keyroostctl"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "clap",
  "clap_complete",

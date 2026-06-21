@@ -6,6 +6,49 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-06-21
+
+A bugfix release: it repairs the Flatpak repository install (broken in 0.7.0)
+and two text-size controls in the GUI. No library or protocol changes — the
+`keyroost-*` crates are unchanged save for the version bump.
+
+### Fixed
+- **Flatpak repo install failed GPG verification** — the published OSTree repo
+  signed only its summary, not the commit objects, so installing from the remote
+  failed with *"GPG verification enabled, but no signatures found"* even though
+  `flatpak remote-info` (which checks only the summary) succeeded. The release
+  workflow now signs the commits (`flatpak build-sign`) before refreshing the
+  summary. The offline `.flatpak` bundle attached to each release was unaffected.
+  Reported by [@errant253](https://github.com/errant253)
+  ([#46](https://github.com/framefilter/keyroost/issues/46)).
+- **GUI text-size slider jumped at the 99%↔100% boundary** — the percentage
+  readout grew from 3 to 4 characters as the value crossed 100%, and in the top
+  bar's right-to-left layout the wider label shifted the slider track under the
+  cursor, making the value lurch (to ~110% going up, ~87% coming back down). The
+  readout now reserves a fixed width, so the track stays put. Reported by
+  [@StefanSa](https://github.com/StefanSa) with a detailed repro from
+  [@errant253](https://github.com/errant253)
+  ([#42](https://github.com/framefilter/keyroost/issues/42)).
+- **Ctrl +/- zoom ignored the 80–200% bounds** — keyboard and scroll zoom could
+  scale the interface past the slider's limits (roughly 20–500%) while the
+  readout and the persisted value capped at 200%. Keyboard zoom is now clamped to
+  the same range as the slider
+  ([#42](https://github.com/framefilter/keyroost/issues/42)).
+
+### Changed
+- **README** — the winget entry is marked pending Microsoft's catalog review (the
+  manifest is submitted but not yet merged into the public catalog), and the
+  available-channels summary now reflects the Flatpak and AppImage bundles that
+  shipped in 0.7.0. Prompted by [@errant253](https://github.com/errant253)
+  ([#46](https://github.com/framefilter/keyroost/issues/46)).
+- **README — supported-devices accuracy + a Roadmap section.** Corrected the
+  device table (dropped dated framing, fixed an OpenPGP line that implied a
+  standalone "register for GnuPG" command when the fingerprint/timestamp is
+  written by generate/import, and added a row describing behavior on any
+  standards-compliant FIDO2 key), and added a Roadmap section listing planned
+  OnlyKey support ([#37](https://github.com/framefilter/keyroost/issues/37)) and
+  inviting hardware-support requests via issues.
+
 ## [0.7.0] - 2026-06-20
 
 ### Added
@@ -322,7 +365,8 @@ multi-vendor hardware-security-key manager, then took its neutral name. Highligh
   external dependencies are `pcsc`, `clap`, `eframe`/`egui`, `serde`, and
   (for RSA keygen/parsing) `rsa`/`rand`.
 
-[Unreleased]: https://github.com/framefilter/keyroost/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/framefilter/keyroost/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/framefilter/keyroost/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/framefilter/keyroost/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/framefilter/keyroost/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/framefilter/keyroost/compare/v0.5.0...v0.5.1
