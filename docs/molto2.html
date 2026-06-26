@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Token2 Molto2 — programmable TOTP token — keyroost</title>
-<meta name="description" content="What the Token2 Molto2 / Molto2v2 programmable TOTP hardware token is, how slots and bulk import work, the customer key, clock sync, and what keyroost does.">
+<meta name="description" content="What the Token2 Molto2 / Molto2v2 programmable TOTP hardware token is, how slots and bulk import work, the customer key, clock sync, and what keyroost does — plus the single-profile siblings (OTPC, miniOTP, C30x).">
 <link rel="stylesheet" href="assets/keyroost-theme.css">
 <link rel="stylesheet" href="assets/site.css">
 <script>(function(){try{var t=localStorage.getItem('kr-theme');if(t==='light'||(!t&&window.matchMedia&&matchMedia('(prefers-color-scheme: light)').matches))document.documentElement.setAttribute('data-theme','light');}catch(e){}})();</script>
@@ -101,6 +101,39 @@
         an <code>otpauth://</code> list; sync the host clock; rotate the customer key; and
         factory-reset — over a pure-Rust protocol layer (SM4, SHA-1, APDU builders, MAC)
         with no external crypto dependencies.</p>
+    </div>
+  </section>
+
+  <section class="kr-section" id="single-profile">
+    <h2>The single-profile siblings (OTPC, miniOTP, C30x)</h2>
+    <p>The Molto2 holds many accounts; Token2 also makes a family of
+      <strong>single-profile</strong> programmable tokens that hold exactly one. These are
+      card- and fob-shaped tokens — <strong>OTPC-P1-i</strong> / <strong>OTPC-P2-i</strong>,
+      <strong>miniOTP-2-i</strong> / <strong>miniOTP-3-i</strong>, <strong>C301-i</strong>,
+      and <strong>C302-i</strong> — that show one rolling code on a small display. keyroost
+      programs them over the same kind of smart-card (PC/SC) interface as the Molto2, over a
+      contactless <em>or</em> contact (chip) reader.</p>
+    <ul>
+      <li>Write the <strong>TOTP seed</strong> for the single account the token carries.</li>
+      <li>Set the <strong>configuration</strong> — HMAC algorithm (SHA1 / SHA256), time-step
+        (30 s / 60 s), and display timeout — and sync the device clock to the host.</li>
+      <li>keyroost reads back the device <strong>serial and model</strong> and refuses to
+        program a token whose serial doesn't match a known model.</li>
+    </ul>
+    <div class="kr-callout note">
+      <div class="kr-callout-title note">No customer key — a fixed device key</div>
+      <p>Unlike the Molto2, these tokens don't have a per-device customer key. They
+        authenticate with a single fixed device key, so there's nothing to rotate or lose —
+        but equally, anyone with physical access and a reader can reprogram one. The wire
+        protocol (a close relative of the Molto2's, same SM4 cipher and MAC) is documented
+        independently in the project's <code>PROTOCOL-token2prog.md</code>.</p>
+    </div>
+    <div class="kr-tool">
+      <span class="kr-mark mono">k</span>
+      <p>From the CLI: <code>keyroostctl prog info</code> (serial, model, on-device clock),
+        <code>keyroostctl prog seed</code> (seed from stdin / env, never argv), and
+        <code>keyroostctl prog config</code> (algorithm, time-step, display timeout). The GUI
+        offers the same on a dedicated programmable-token pane.</p>
     </div>
   </section>
 

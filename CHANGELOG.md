@@ -6,6 +6,55 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-06-26
+
+### Added
+- **Token2 single-profile programmable TOTP token** — a `keyroostctl prog`
+  group (`info` / `seed` / `config`) and a GUI pane that program the seed and
+  TOTP configuration onto Token2's single-account card/fob tokens (OTPC-P1-i /
+  P2-i, miniOTP-2-i / 3-i, C301-i, C302-i) over a PC/SC reader, authenticating
+  with the device's fixed key (no customer key, single slot). A new pure-Rust
+  `keyroost-token2prog` crate carries the wire protocol — a close relative of
+  the Molto2's (same SM4 cipher and ISO/IEC 9797-1 MAC) — documented
+  independently in `docs/PROTOCOL-token2prog.md`. The write commands refuse to
+  run unless the device serial matches a known model
+  ([#49](https://github.com/framefilter/keyroost/pull/49)).
+- **Contact-reader (ISO-7816 T=0) support** — FIDO2 and on-device OATH now work
+  over a contact / chip reader as well as NFC, completing the PC/SC transport
+  begun in 0.7.0 (the `61 XX` / `GET RESPONSE` and `6C XX` continuations are
+  reassembled for T=0 readers)
+  ([#43](https://github.com/framefilter/keyroost/issues/43)).
+- **QR-from-screen scanning** — the `qr` import feature can now scan a QR code
+  straight from the live screen, in addition to PNG/JPEG screenshots and Google
+  Authenticator export batches, and is compiled into the pre-built release and
+  AppImage binaries ([#50](https://github.com/framefilter/keyroost/pull/50)).
+- **OTP secret reveal toggle** — secret-entry fields in the GUI gain a reveal
+  (eye) toggle so you can verify an OTP secret before committing it
+  ([#52](https://github.com/framefilter/keyroost/issues/52)).
+- **Fuller passkey details** — resident-credential metadata now surfaces the
+  user's UPN, display name, user id, and the full credential id
+  ([#55](https://github.com/framefilter/keyroost/issues/55)).
+- **AppImage AppStream metainfo + zsync** — the AppImage now ships AppStream
+  metainfo and a `.zsync` sidecar for delta updates
+  ([#53](https://github.com/framefilter/keyroost/pull/53)).
+
+### Changed
+- **Relaxed, anti-spoofing device naming + Windows config path** — friendly
+  device names accept a more permissive, readable character set while being
+  validated against spoofing (e.g. homoglyph / control-character) tricks, and
+  the `keys.json` registry is saved under `%APPDATA%` on Windows
+  ([#56](https://github.com/framefilter/keyroost/issues/56)).
+
+### Fixed
+- **Duplicate device entries when several keys are plugged in** — keys are now
+  de-duplicated by USB topology, so the same physical key no longer appears more
+  than once during enumeration
+  ([#51](https://github.com/framefilter/keyroost/pull/51)).
+- **AppImage uses the host's pcsc-lite** — the AppImage no longer bundles its
+  own libpcsclite, instead linking the host's so the smart-card client always
+  matches the host `pcscd` daemon
+  ([#47](https://github.com/framefilter/keyroost/pull/47)).
+
 ## [0.7.1] - 2026-06-21
 
 A bugfix release: it repairs the Flatpak repository install (broken in 0.7.0)
@@ -365,7 +414,8 @@ multi-vendor hardware-security-key manager, then took its neutral name. Highligh
   external dependencies are `pcsc`, `clap`, `eframe`/`egui`, `serde`, and
   (for RSA keygen/parsing) `rsa`/`rand`.
 
-[Unreleased]: https://github.com/framefilter/keyroost/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/framefilter/keyroost/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/framefilter/keyroost/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/framefilter/keyroost/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/framefilter/keyroost/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/framefilter/keyroost/compare/v0.5.1...v0.6.0

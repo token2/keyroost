@@ -31,10 +31,13 @@ a short, vendor-neutral tour of what FIDO2, OATH, OpenPGP, and PIV actually do.
   the PIN, reset a key. PIN protocols v1 and v2. CTAP 2.1 security policy over
   `authenticatorConfig` (always-require-UV, minimum PIN length, force a PIN
   change, enterprise attestation) and a `large-blob` store for plaintext notes
-  over `authenticatorLargeBlobs`. Works over USB-HID and over NFC (CTAP-over-NFC
-  via a PC/SC reader), not just USB.
+  over `authenticatorLargeBlobs`. Works over USB-HID and over a PC/SC reader —
+  both NFC (CTAP-over-NFC) and a contact / ISO-7816 chip reader (T=0) — not just
+  direct USB. Resident-credential metadata surfaces the fuller passkey detail
+  too: the user's UPN, display name, user id, and the full credential id.
 - **OATH (TOTP/HOTP)** — list, add, delete, and compute codes over PC/SC,
-  including applet-password set / clear / unlock.
+  including applet-password set / clear / unlock. In the GUI, secret fields have
+  a reveal (eye) toggle so you can check an OTP secret before committing it.
 - **OpenPGP card (v3.4)** — read status; generate or import RSA-2048 keys (host
   keygen or a PKCS#1/PKCS#8 PEM/DER file) for the signature, encryption, or
   authentication slot — each writes the v4 fingerprint and a generation timestamp
@@ -52,8 +55,18 @@ a short, vendor-neutral tour of what FIDO2, OATH, OpenPGP, and PIV actually do.
   management key and PIN come from env/stdin once, so a shell loop does the batch
   (see the [PIV guide](https://framefilter.github.io/keyroost/piv.html)).
 - **Token2 Molto2 / Molto2v2** — program a slot from an `otpauth://` URI;
-  bulk-import from Aegis (plaintext or encrypted), 2FAS, or a list of `otpauth://`
-  URIs; sync the host clock; rotate the customer key; factory reset.
+  bulk-import from Aegis (plaintext or encrypted), 2FAS, a list of `otpauth://`
+  URIs, or a QR code scanned from a PNG/JPEG screenshot or the live screen; sync
+  the host clock; rotate the customer key; factory reset.
+- **Token2 single-profile programmable TOTP token** — program the seed and TOTP
+  configuration onto Token2's single-account card/fob tokens (OTPC-P1-i / P2-i,
+  miniOTP-2-i / 3-i, C301-i, C302-i) over a PC/SC reader. These authenticate
+  with a fixed device key rather than a customer key, and hold one account
+  rather than many; keyroost reads the device serial / model and on-device
+  clock, writes the seed, and sets the HMAC algorithm, time-step, and
+  display-timeout (`prog info` / `seed` / `config`, or the GUI's
+  programmable-token pane). The wire protocol is documented in
+  [`docs/PROTOCOL-token2prog.md`](docs/PROTOCOL-token2prog.md).
 - **Token2 on-device OTP (PIN+ Series FIDO keys)** — store TOTP/HOTP credentials
   directly on a Token2 FIDO security key and read their codes over USB-HID, NFC,
   or CCID; configure the single HOTP-on-touch keystroke slot; read the serial;
@@ -61,13 +74,16 @@ a short, vendor-neutral tour of what FIDO2, OATH, OpenPGP, and PIV actually do.
 - **Friendly device names** — an opt-in `keys.json` registry to target a specific
   physical key by name when several are connected, instead of by a reshuffling
   `/dev/hidrawN` path. Destructive operations always resolve to an explicit
-  target, never a default.
+  target, never a default. The registry lives under `%APPDATA%` on Windows (the
+  platform config dir elsewhere), and names are validated with anti-spoofing
+  checks while allowing a relaxed, readable character set.
 
 ## Supported devices
 
 | Device | Capabilities | Notes |
 |---|---|---|
 | **Token2 Molto2 / Molto2v2** | TOTP slot programming, bulk import | Hardware-verified. Programmed over the vendor-specific SM4-MAC protocol ([docs/PROTOCOL.md](docs/PROTOCOL.md)); supports bulk import from Aegis / 2FAS / otpauth-list, clock sync, and customer-key rotation. |
+| **Token2 single-profile tokens** (OTPC-P1-i / P2-i, miniOTP-2-i / 3-i, C301-i, C302-i) | Single-account TOTP seed + config programming | Programmed over the vendor-specific SM4-MAC protocol with a fixed device key ([docs/PROTOCOL-token2prog.md](docs/PROTOCOL-token2prog.md)); writes the seed and the TOTP algorithm / time-step / display-timeout over a contact or contactless PC/SC reader. The model is recognized from the device serial. |
 | **Token2 PIN+ Series** | FIDO2 (+ bio), OTP, OpenPGP, PIV | FIDO2 with fingerprint/bio enrollment and FIDO Metadata Service (MDS) display, plus on-device OTP (TOTP/HOTP, incl. HID/keyboard HOTP) over USB-HID / NFC / CCID — all validated on PIN+ hardware. Contributed by [@token2](https://github.com/token2). The OATH / OpenPGP / PIV smart-card applets are handled by the standard byte layers but **not yet exercised on PIN+ hardware by this project** (experimental). |
 | **YubiKey** (5 series) | FIDO2, OATH, OpenPGP, PIV | Built and verified against a YubiKey 5.7. |
 | **SoloKeys Solo 2** | FIDO2, OATH | Trussed firmware; no OpenPGP applet. |
@@ -172,6 +188,14 @@ an open industry standard.
     per-command MAC.
   - **SHA-1** — [RFC 3174](https://www.rfc-editor.org/rfc/rfc3174) — to derive
     the SM4 key from the customer key.
+
+**Token2 single-profile programmable token (vendor-specific)**
+- The wire protocol of Token2's single-profile programmable TOTP tokens (OTPC /
+  miniOTP / C30x), a close relative of the Molto2 protocol — same NFC Type-4 /
+  ISO 7816 transport, SM4 cipher, and ISO/IEC 9797-1 MAC — but authenticated
+  with a fixed device key (no customer key) and addressing a single slot.
+  Documented independently in
+  [`docs/PROTOCOL-token2prog.md`](docs/PROTOCOL-token2prog.md).
 
 **Token2 on-device OTP (vendor-specific)**
 - The Token2 OTP-on-FIDO management protocol used by the PIN+ Series keys,
@@ -451,6 +475,11 @@ keyroostctl molto info
 keyroostctl molto import --profile 0 'otpauth://totp/GitHub:me@x.com?secret=JBSWY3DPEHPK3PXP'
 keyroostctl molto import-file ~/Downloads/aegis.json --start 0 --dry-run   # validate first
 
+# --- Token2 single-profile programmable token (OTPC / miniOTP / C30x) ---
+keyroostctl prog info                          # serial, model, and on-device clock
+keyroostctl prog seed --base32-stdin           # base32 seed from stdin, never argv
+keyroostctl prog config --algorithm sha1 --time-step 30 --display-timeout 30
+
 # --- Token2 on-device OTP (PIN+ Series FIDO keys) ---
 keyroostctl otp list
 keyroostctl otp add GitHub me@x.com --seed-stdin    # base32 seed from stdin, never argv
@@ -460,7 +489,7 @@ keyroostctl otp get GitHub me@x.com
 keyroostctl key-name list
 
 # launch the GUI (per-device tabs: Overview, Security Keys, OATH, OpenPGP, PIV,
-# On-device OTP, plus the distinct Molto2 view)
+# On-device OTP, plus the distinct Molto2 and single-profile programmable-token views)
 keyroost
 ```
 
@@ -507,11 +536,12 @@ commands are unchanged.
 | `keyroost-openpgp` | Pure-Rust OpenPGP Card v3.4 byte layer (APDU + BER-TLV) | none |
 | `keyroost-piv` | Pure-Rust PIV (SP 800-73-4) byte layer; full management + SPKI/PEM | none |
 | `keyroost-token2otp` | Pure-Rust Token2 OTP-on-FIDO byte/codec layer (APDU + HID framing) | RustCrypto (`sha2`/`aes`/`cbc`/`p256`) for ECDH seed encryption, `zeroize` |
+| `keyroost-token2prog` | Pure-Rust Token2 single-profile programmable-token wire protocol (SM4 seed/MAC, fixed device key, config TLV); reuses `keyroost-proto` | none |
 | `keyroost-keyring` | Friendly-name registry (`keys.json`); serial matching | `serde`, `serde_json` |
 | `keyroost-resolve` | Shared key-identity resolution (USB + CCID serials, topology match) | none |
 | `keyroost-rsakey` | Host-side RSA-2048 keygen + PKCS#1/PKCS#8 (PEM/DER) loading | `rsa`, `rand`, `zeroize` |
 | `keyroost-import` | `otpauth://` + Aegis / 2FAS / otpauth-list parsers | `serde`/`serde_json`, `scrypt`, `aes-gcm`, `base64`, `zeroize` (all behind `bulk`) |
-| `keyroost-qr` | QR-image 2FA import (PNG/JPEG screenshots, GA export batches) | `rqrr`, `png`, `jpeg-decoder`, `zeroize` |
+| `keyroost-qr` | QR 2FA import from PNG/JPEG screenshots, a live screen capture, and GA export batches (optional `qr` feature; built into the release + AppImage binaries) | `rqrr`, `png`, `jpeg-decoder`, `zeroize` |
 | `keyroostctl` | Command-line interface | `clap`, `clap_complete`, `clap_mangen`, `zeroize` |
 | `keyroost` | egui desktop GUI | `eframe`, `egui`, `arboard`, `zeroize` |
 
@@ -519,8 +549,10 @@ commands are unchanged.
 
 The Molto2 wire protocol is documented in [`docs/PROTOCOL.md`](docs/PROTOCOL.md)
 — the APDUs, the SM4-based MAC, and the TLV config payload, described as facts
-about the device rather than any one implementation. The FIDO2, OATH, and OpenPGP
-layers follow their respective public standards.
+about the device rather than any one implementation. The sibling single-profile
+programmable token (OTPC / miniOTP / C30x) is documented the same way in
+[`docs/PROTOCOL-token2prog.md`](docs/PROTOCOL-token2prog.md). The FIDO2, OATH,
+and OpenPGP layers follow their respective public standards.
 
 ## Contact
 
