@@ -78,6 +78,7 @@ jobs:
             libpcsclite-dev \
             libxkbcommon-dev libwayland-dev \
             libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libx11-dev libxrandr-dev libxcb1-dev libdbus-1-dev \
             libgl1-mesa-dev libssl-dev \
             libfuse2
 

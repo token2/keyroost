@@ -41,6 +41,7 @@ jobs:
             libpcsclite-dev \
             libxkbcommon-dev libwayland-dev \
             libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libx11-dev libxrandr-dev libxcb1-dev libdbus-1-dev \
             libgl1-mesa-dev libssl-dev
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable branch, 2026-06
@@ -48,7 +49,7 @@ jobs:
           toolchain: stable
 
       - name: Build release binaries
-        run: cargo build --release --locked -p keyroostctl -p keyroost
+        run: cargo build --release --locked -p keyroostctl -p keyroost --features keyroost/qr
 
       - name: Package
         run: |
@@ -79,8 +80,8 @@ jobs:
 
       - name: Build release binaries (both arches)
         run: |
-          cargo build --release --locked --target aarch64-apple-darwin -p keyroostctl -p keyroost
-          cargo build --release --locked --target x86_64-apple-darwin  -p keyroostctl -p keyroost
+          cargo build --release --locked --target aarch64-apple-darwin -p keyroostctl -p keyroost --features keyroost/qr
+          cargo build --release --locked --target x86_64-apple-darwin  -p keyroostctl -p keyroost --features keyroost/qr
 
       - name: Combine into universal2 + package
         run: |
@@ -113,7 +114,7 @@ jobs:
           toolchain: stable
 
       - name: Build release binaries
-        run: cargo build --release --locked -p keyroostctl -p keyroost
+        run: cargo build --release --locked -p keyroostctl -p keyroost --features keyroost/qr
 
       - name: Package
         shell: pwsh

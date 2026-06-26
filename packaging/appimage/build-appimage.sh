@@ -44,7 +44,7 @@ APPDIR="${BUILD_DIR}/AppDir"
 #    as an AppImage — use the musl static CLI (../musl/) or the release tarball.
 # ---------------------------------------------------------------------------
 echo ">> building keyroost (GUI) release binary"
-( cd "${REPO_ROOT}" && cargo build --release -p keyroost )
+( cd "${REPO_ROOT}" && cargo build --release -p keyroost --features keyroost/qr )
 BIN="${REPO_ROOT}/target/release/keyroost"
 [ -x "${BIN}" ] || { echo "ERROR: ${BIN} not built"; exit 1; }
 
