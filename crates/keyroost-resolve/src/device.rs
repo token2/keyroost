@@ -321,17 +321,34 @@ pub fn correlate(hids: &[HidDevice], probes: &[ReaderProbe], keyring: &Keyring) 
                 })
                 .map(|c| c.reader_name.clone())
         } else {
-            let vt = vendor_name(hid.vendor_id);
-            let matches: Vec<&str> = probes
+            // Match this HID to its reader by USB topology (bus+address) first.
+            // That is unambiguous even with several same-vendor keys plugged in
+            // (#51: two Token2 PIN+ keys each have a reader whose name contains
+            // "Token2", so the vendor-name heuristic below matches both and gives
+            // up, leaving the HID unmerged and the key duplicated). Fall back to a
+            // unique vendor-name match only when topology is unavailable.
+            probes
                 .iter()
                 .filter(|p| !p.is_molto2)
-                .map(|p| p.reader_name.as_str())
-                .filter(|r| r.to_ascii_lowercase().contains(&vt.to_ascii_lowercase()))
-                .collect();
-            match matches.as_slice() {
-                [only] => Some((*only).to_string()),
-                _ => None,
-            }
+                .find(|p| {
+                    p.usb_bus.is_some()
+                        && p.usb_bus == hid.usb_bus
+                        && p.usb_address == hid.usb_address
+                })
+                .map(|p| p.reader_name.clone())
+                .or_else(|| {
+                    let vt = vendor_name(hid.vendor_id);
+                    let matches: Vec<&str> = probes
+                        .iter()
+                        .filter(|p| !p.is_molto2)
+                        .map(|p| p.reader_name.as_str())
+                        .filter(|r| r.to_ascii_lowercase().contains(&vt.to_ascii_lowercase()))
+                        .collect();
+                    match matches.as_slice() {
+                        [only] => Some((*only).to_string()),
+                        _ => None,
+                    }
+                })
         };
 
         let existing = devices.iter_mut().find(|d| {
@@ -502,6 +519,66 @@ mod tests {
         )];
         let devs = correlate(&hids, &probes, &Keyring::default());
         assert!(devs.iter().all(|d| d.kind != DeviceKind::Token));
+    }
+
+    #[test]
+    fn two_token2_keys_are_deduped_by_topology() {
+        // #51: two Token2 PIN+ keys, each with a FIDO HID node AND a PC/SC reader
+        // whose name contains "Token2". The vendor-name heuristic matches both
+        // readers and gives up, so without topology disambiguation each key was
+        // listed twice (its CCID device plus an unmerged HID-only device).
+        let probes = [
+            probe(
+                "Token2 PIN+ Bio 00 00",
+                false,
+                true,
+                false,
+                false,
+                None,
+                Some(1),
+                Some(2),
+            ),
+            probe(
+                "Token2 PIN+ Octo 00 00",
+                false,
+                true,
+                false,
+                false,
+                None,
+                Some(1),
+                Some(3),
+            ),
+        ];
+        let hids = [
+            hid(
+                keyroost_proto::USB_VID,
+                0x0031,
+                "/dev/hidraw1",
+                None,
+                Some(1),
+                Some(2),
+            ),
+            hid(
+                keyroost_proto::USB_VID,
+                0x0032,
+                "/dev/hidraw2",
+                None,
+                Some(1),
+                Some(3),
+            ),
+        ];
+        let devs = correlate(&hids, &probes, &Keyring::default());
+        assert_eq!(
+            devs.len(),
+            2,
+            "each key should appear once, got {} devices",
+            devs.len()
+        );
+        assert!(devs.iter().all(|d| d.kind == DeviceKind::Key));
+        assert!(
+            devs.iter().all(|d| d.transport.contains("FIDO HID")),
+            "both keys should have merged their FIDO HID into the CCID device"
+        );
     }
 
     #[test]
