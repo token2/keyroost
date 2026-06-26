@@ -66,6 +66,8 @@
     <!-- CUT STEP: at each release, prepend a <release> for the new version with
          the tag date, matching the workspace version in the root Cargo.toml.
          Next cut: add <release version="0.7.0" date="YYYY-MM-DD"/> above this. -->
+    <release version="0.7.2" date="2026-06-26"/>
+    <release version="0.7.1" date="2026-06-21"/>
     <release version="0.7.0" date="2026-06-20"/>
     <release version="0.6.0" date="2026-06-17"/>
   </releases>
