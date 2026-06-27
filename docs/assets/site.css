@@ -50,6 +50,9 @@
 
 /* ---------- hero ---------- */
 .kr-hero { padding: 56px 0 30px; border-bottom: 1px solid var(--kr-line); }
+.kr-hero-logo { display: block; width: 116px; height: 116px; margin: 0 0 22px;
+  border-radius: var(--kr-r-card); border: 1px solid var(--kr-line);
+  box-shadow: 0 6px 22px rgba(0,0,0,0.18); }
 .kr-hero .kr-label { margin-bottom: 12px; }
 .kr-hero h1 { margin: 0 0 14px; }
 .kr-hero .q { color: var(--kr-txt-2); font-weight: 400; }

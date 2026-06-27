@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/keyroost-logo.png" alt="keyroost" width="200">
+</p>
+
 # keyroost
 
 An independent, vendor-neutral app for managing all your hardware security keys
