@@ -50,21 +50,27 @@ modules:
   #    produce a client-only build on that version (flag names drift 1.9 -> 2.x).
   # ----------------------------------------------------------------------------
   - name: pcsc-lite
-    buildsystem: autotools
+    # pcsc-lite is meson-only since 2.x (no ./configure). We build just the
+    # libpcsclite CLIENT lib (no daemon): disabling systemd/polkit/udev and the
+    # USB/serial reader backends leaves the lib with no optional deps (verified
+    # against meson.build — usb/serial/libudev are all optional, no error path).
+    buildsystem: meson
     config-opts:
-      - --disable-libsystemd
-      - --disable-polkit
-      - --disable-libudev
-      - --enable-usbdropdir=/app/lib/pcsc/drivers   # unused (no daemon) but keeps configure happy
-      - --disable-documentation
+      - -Dlibsystemd=false
+      - -Dpolkit=false
+      - -Dlibudev=false
+      - -Dusb=false
+      - -Dserial=false
     sources:
       - type: archive
-        # pcsc-lite 2.3.0 (upstream ships .tar.xz; verified + hashed 2026-06-20).
-        # To bump: pick a newer release from https://pcsclite.apdu.fr/files/ and
-        #   curl -fsSLO "https://pcsclite.apdu.fr/files/pcsc-lite-<ver>.tar.xz" && sha256sum it.
-        # flatpak-builder refuses to build unless the sha256 matches.
-        url: https://pcsclite.apdu.fr/files/pcsc-lite-2.3.0.tar.xz
-        sha256: 1acca22d2891d43ffe6d782740d32e78150d4fcc99e8a3cc763abaf546060d3d
+        # pcsc-lite 2.5.1 (.tar.xz; verified + hashed 2026-06-30). NOTE:
+        # pcsclite.apdu.fr keeps only the latest ~2 releases, so this URL
+        # eventually 404s (it did for 2.3.0). When CI fails to download, bump:
+        #   curl -fsSLO "https://pcsclite.apdu.fr/files/pcsc-lite-<ver>.tar.xz" && sha256sum it
+        # flatpak-builder refuses to build unless the sha256 matches. (Still
+        # meson — keep buildsystem: meson.)
+        url: https://pcsclite.apdu.fr/files/pcsc-lite-2.5.1.tar.xz
+        sha256: bfcfe38a20afc49849c6bf55325e38f449fc4b26d3923fdc32b969ae41a8741b
     # We only need the libpcsclite client .so; the daemon (pcscd) is the host's.
     cleanup:
       - /bin/pcscd
