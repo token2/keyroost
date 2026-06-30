@@ -9,6 +9,13 @@ NestedInstallerFiles:
     PortableCommandAlias: keyroostctl
   - RelativeFilePath: keyroost.exe
     PortableCommandAlias: keyroost
+# The Windows binaries link the MSVC runtime (vcruntime140.dll), so declare the
+# VC++ 2015+ redistributable as a package dependency — winget then installs it
+# alongside keyroost. Requested by the winget moderator on the bootstrap PR
+# (microsoft/winget-pkgs#390300); also resolves the vcruntime140 note in #54.
+Dependencies:
+  PackageDependencies:
+    - PackageIdentifier: Microsoft.VCRedist.2015+.x64
 Installers:
   - Architecture: x64
     InstallerUrl: https://github.com/framefilter/keyroost/releases/download/v@VERSION@/keyroost-v@VERSION@-windows-x86_64.zip
