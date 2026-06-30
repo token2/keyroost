@@ -1266,6 +1266,12 @@ struct App {
     /// until the drag is released — see `text_size_control`. `None` means no
     /// drag in flight, so the readout/handle track the committed factor.
     zoom_pending: Option<f32>,
+    /// Deadline for committing a +/− stepper preview (see `text_size_control`).
+    /// The steppers stash their target in `zoom_pending` and set this; the zoom
+    /// is applied once the user settles — pointer off the buttons, or this
+    /// instant passes — so repeated clicks don't rescale the bar out from under
+    /// the cursor mid-click. `None` when no stepper preview is pending.
+    zoom_commit_at: Option<std::time::Instant>,
     /// The last `Settings` snapshot written to `settings.json` (or loaded at
     /// startup). `persist_settings()` compares the current UI state against
     /// this and only writes when something actually changed, so the disk isn't
@@ -6090,7 +6096,7 @@ impl App {
         // (0.01). The bar is laid out right-to-left, so to read "[−] slider [+]"
         // left-to-right we emit the [+] first, then the slider, then the [−].
         // A small closure paints one square stepper button and reports clicks.
-        let step = |ui: &mut egui::Ui, glyph: &str| -> bool {
+        let step = |ui: &mut egui::Ui, glyph: &str| -> egui::Response {
             let (rect, resp) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click());
             let hot = resp.hovered();
             ui.painter()
@@ -6103,14 +6109,18 @@ impl App {
                 if hot { p.txt } else { p.txt2 },
             );
             resp.on_hover_cursor(egui::CursorIcon::PointingHand)
-                .clicked()
         };
 
-        // [+] (rightmost of the trio in this RTL row).
-        if step(ui, "+") {
+        // [+] (rightmost of the trio in this RTL row). Preview only (stash in
+        // `zoom_pending` + arm the commit timer); the rescale is deferred so the
+        // button stays under the cursor for repeated clicks — see the commit
+        // block after the [−] stepper.
+        let plus = step(ui, "+");
+        if plus.clicked() {
             factor = theme::clamp_zoom(factor + 0.01);
-            ui.ctx().set_zoom_factor(factor);
-            self.zoom_pending = None;
+            self.zoom_pending = Some(factor);
+            self.zoom_commit_at =
+                Some(std::time::Instant::now() + std::time::Duration::from_millis(350));
         }
         ui.add_space(4.0);
 
@@ -6121,25 +6131,51 @@ impl App {
         );
         if resp.dragged() {
             // Mid-drag: preview only, don't touch the context (avoids runaway).
+            // A drag supersedes any pending stepper preview.
             self.zoom_pending = Some(theme::clamp_zoom(factor));
+            self.zoom_commit_at = None;
         } else if resp.drag_stopped() {
             // Drag released: commit the chosen size to the context once.
             ui.ctx().set_zoom_factor(theme::clamp_zoom(factor));
             self.zoom_pending = None;
+            self.zoom_commit_at = None;
         } else if resp.changed() {
             // Click/keyboard committed a value without a drag (e.g. arrow keys
             // or clicking the track): apply immediately, nothing to preview.
             ui.ctx().set_zoom_factor(theme::clamp_zoom(factor));
             self.zoom_pending = None;
+            self.zoom_commit_at = None;
         }
-        resp.on_hover_text("Text size — scales the whole interface (Ctrl + / Ctrl − also work)");
+        let resp = resp
+            .on_hover_text("Text size — scales the whole interface (Ctrl + / Ctrl − also work)");
 
         ui.add_space(4.0);
-        // [−] (leftmost of the trio).
-        if step(ui, "\u{2212}") {
+        // [−] (leftmost of the trio). Preview-only like [+].
+        let minus = step(ui, "\u{2212}");
+        if minus.clicked() {
             factor = theme::clamp_zoom(factor - 0.01);
-            ui.ctx().set_zoom_factor(factor);
-            self.zoom_pending = None;
+            self.zoom_pending = Some(factor);
+            self.zoom_commit_at =
+                Some(std::time::Instant::now() + std::time::Duration::from_millis(350));
+        }
+
+        // Commit a stepper preview once the user settles: pointer off both
+        // buttons, or 350ms since the last click. The slider commits its own
+        // preview on release, so a pending value reaching here is always from a
+        // stepper. Deferring keeps the bar (and the buttons) from rescaling out
+        // from under the cursor during a run of clicks; we repaint at the
+        // deadline so it still applies if the pointer never moves.
+        if let Some(at) = self.zoom_commit_at {
+            let settled = (!plus.hovered() && !minus.hovered()) || std::time::Instant::now() >= at;
+            if settled && !resp.dragged() {
+                if let Some(f) = self.zoom_pending.take() {
+                    ui.ctx().set_zoom_factor(f);
+                }
+                self.zoom_commit_at = None;
+            } else {
+                ui.ctx()
+                    .request_repaint_after(at.saturating_duration_since(std::time::Instant::now()));
+            }
         }
 
         ui.add_space(7.0);
@@ -6169,6 +6205,7 @@ impl App {
             {
                 ui.ctx().set_zoom_factor(theme::ZOOM_DEFAULT);
                 self.zoom_pending = None;
+                self.zoom_commit_at = None;
             }
         }
     }
