@@ -1,0 +1,24 @@
+[package]
+name = "keyroost-screengrab"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Windows-only still screen capture (GDI BitBlt) for keyroost's QR-from-screen; inert on other platforms."
+
+# The one place keyroost's screen capture needs unsafe: a thin FFI shim over
+# Win32 GDI, confined here so the GUI crate keeps forbid(unsafe_code). Linux
+# (x11rb / xdg-desktop-portal) and macOS (`screencapture`) capture stay on the
+# safe path inside `keyroost` itself — only Windows needs raw FFI.
+[lints.rust]
+unsafe_code = "allow"
+
+# Windows-only: on every other target the crate compiles to an inert stub with
+# no dependencies, so `keyroost` can depend on it unconditionally.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+] }

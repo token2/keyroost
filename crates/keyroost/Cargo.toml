@@ -33,6 +33,9 @@ keyroost-rsakey = { path = "../keyroost-rsakey", version = "0.7.3" }
 # Windows-only helper for the non-admin FIDO2 path: detect a FIDO key, open
 # Windows' security-key settings, and relaunch elevated. Inert on other platforms.
 keyroost-winwebauthn = { path = "../keyroost-winwebauthn", version = "0.7.3" }
+# Windows-only GDI screen capture for QR-from-screen; its unsafe FFI is isolated
+# in that crate so this one keeps forbid(unsafe_code). Inert (no deps) off Windows.
+keyroost-screengrab = { path = "../keyroost-screengrab", version = "0.7.3" }
 eframe = { version = "0.35", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 egui = "0.35"
 # Already in the tree via eframe/egui-winit's clipboard integration; direct
@@ -60,17 +63,33 @@ rfd = { version = "0.17", default-features = false, features = ["xdg-portal", "w
 # directly so `pollster::block_on` is callable.
 pollster = "0.4"
 
-# QR-from-screen scanning (optional; `--features qr`). Only the screen capture
-# is new here — decoding reuses keyroost-qr (already a dependency). `screenshots`
-# is pinned (future-incompat + unmaintained); migration to `xcap` is tracked
-# separately. The MSRV that motivated the original pin is moot now that the
-# egui 0.35 bump raised the workspace to Rust 1.85.
-screenshots = { version = "=0.5.4", optional = true }
+# QR-from-screen (optional; `--features qr`): a lightweight, STILL-only screen
+# grab that keeps the one-click UX without a video-capture stack. Decoding
+# reuses keyroost-qr (already a dependency); only the capture backend is new,
+# per platform (see src/screengrab.rs):
+#   Linux X11     -> x11rb root GetImage (already in the tree via winit)
+#   Linux Wayland -> xdg-desktop-portal Screenshot via ashpd (pure Rust; adds the
+#                    zbus stack but NO system -dev libraries and no pipewire)
+#   macOS         -> the built-in `screencapture` binary (no crate)
+#   Windows       -> GDI BitBlt via the keyroost-screengrab crate (always a dep)
+# This deliberately replaces `xcap`, whose Linux backend dragged in a whole
+# screencast stack (pipewire, gbm, drm, egl + 5 system -dev packages) to grab a
+# single frame. `qr`-enabled builds need a newer Rust than the base MSRV (ashpd
+# tracks a recent toolchain); the default (non-qr) build keeps the workspace MSRV.
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.13", optional = true }
+# `screenshot` is the portal we use; `async-io` drives it on zbus's async-io
+# runtime (no tokio), which `pollster::block_on` can run. `trash` is only here to
+# work around an ashpd 0.13.12 bug: its `screenshot` feature references
+# `serde_repr` without pulling it, and `trash` is the lightest feature that does.
+ashpd = { version = "0.13", default-features = false, features = ["async-io", "screenshot", "trash"], optional = true }
 
 [features]
-# Scan a TOTP QR shown on screen to fill a seed/profile form. Adds the
-# `screenshots` capture dependency; decoding/parsing are already in the tree.
-qr = ["dep:screenshots"]
+# Scan a TOTP QR shown on screen to fill a seed/profile form. Adds only the
+# per-platform still-capture backend; decoding/parsing are already in the tree.
+# Linux uses x11rb/ashpd; macOS shells out to `screencapture`; Windows uses the
+# always-present keyroost-screengrab crate.
+qr = ["dep:x11rb", "dep:ashpd"]
 
 # cargo-binstall support: `cargo binstall` fetches the existing attested
 # GitHub release archives (same artifacts, same SHA256SUMS/provenance)

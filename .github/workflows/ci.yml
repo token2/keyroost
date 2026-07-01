@@ -74,13 +74,13 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
-  # Surface dependencies the compiler will reject in a future Rust release (e.g.
-  # `screenshots`, pulled in by the optional `qr` feature). Builds `--all-features`
-  # so every opt-in dep is covered — including keyroost-hid's `hidapi-backend`,
-  # whose `hidapi` needs `libudev-dev` (installed below). *Warns* rather than
-  # fails: a flagged crate is tracked for replacement (screenshots → xcap), not
-  # an immediate breakage. Closes the gap dependabot/cargo-audit don't cover: a
-  # crate abandoned-then-renamed, plus compiler future-incompat notices.
+  # Surface dependencies the compiler will reject in a future Rust release.
+  # Builds `--all-features` so every opt-in dep is covered — including the `qr`
+  # feature's screen-capture backend and keyroost-hid's `hidapi-backend`, whose
+  # `hidapi` needs `libudev-dev` (installed below). *Warns* rather than fails: a
+  # flagged crate is tracked for replacement, not an immediate breakage. Closes
+  # the gap dependabot/cargo-audit don't cover: a crate abandoned-then-renamed,
+  # plus compiler future-incompat notices.
   future-incompat:
     name: Future-incompatibility report
     runs-on: ubuntu-latest
@@ -115,7 +115,7 @@ jobs:
               echo ""
               echo "    ${crates}"
               echo ""
-              echo "Run \`cargo report future-incompatibilities\` for detail (e.g. \`screenshots\` → \`xcap\`)."
+              echo "Run \`cargo report future-incompatibilities\` for detail."
             } >> "$GITHUB_STEP_SUMMARY"
           else
             echo "No future-incompatibility warnings — clean."

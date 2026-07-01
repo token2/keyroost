@@ -83,6 +83,47 @@ pub struct QrImport {
 /// wipe-on-drop buffer — callers don't get to forget.
 pub fn texts_from_image(bytes: &[u8]) -> Result<zeroize::Zeroizing<Vec<String>>, QrError> {
     let (w, h, luma) = to_grayscale(bytes)?;
+    texts_from_luma(w, h, &luma)
+}
+
+/// Decode every QR code from a raw RGBA8 pixel buffer — e.g. a live screen
+/// capture that arrives already decoded, so PNG/JPEG decoding is skipped.
+/// `rgba` must be exactly `width * height * 4` bytes. Same wipe-on-drop output
+/// contract as [`texts_from_image`]; [`MAX_PIXELS`] is enforced before the luma
+/// allocation.
+pub fn texts_from_rgba(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> Result<zeroize::Zeroizing<Vec<String>>, QrError> {
+    let pixels = width as u64 * height as u64;
+    if pixels > MAX_PIXELS {
+        return Err(QrError::ImageTooLarge { width, height });
+    }
+    let expected = pixels as usize * 4;
+    if rgba.len() != expected {
+        return Err(QrError::ImageDecode(format!(
+            "RGBA buffer is {} bytes, expected {expected} for {width}x{height}",
+            rgba.len()
+        )));
+    }
+    // Rec. 601 luma, integer approximation — rqrr only needs contrast, and this
+    // mirrors the grayscale the PNG/JPEG file path already produces.
+    let mut luma = vec![0u8; pixels as usize];
+    for (dst, px) in luma.iter_mut().zip(rgba.chunks_exact(4)) {
+        let (r, g, b) = (px[0] as u32, px[1] as u32, px[2] as u32);
+        *dst = ((r * 77 + g * 150 + b * 29) >> 8) as u8;
+    }
+    texts_from_luma(width, height, &luma)
+}
+
+/// Shared rqrr detection + decode over an 8-bit luma buffer, used by both the
+/// PNG/JPEG file path and the raw-RGBA screen-capture path.
+fn texts_from_luma(
+    w: u32,
+    h: u32,
+    luma: &[u8],
+) -> Result<zeroize::Zeroizing<Vec<String>>, QrError> {
     let mut img = rqrr::PreparedImage::prepare_from_greyscale(w as usize, h as usize, |x, y| {
         luma[y * w as usize + x]
     });

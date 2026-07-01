@@ -1,36 +1,40 @@
 //! Scan a TOTP QR code from the screen(s) (feature `qr`).
 //!
-//! Captures every connected display as PNG and hands the bytes to
-//! `keyroost_qr::texts_from_image`, the crate the app already uses to decode QR
-//! screenshots from files — so the screen path and the file/paste paths share
-//! one decoder and one parser. The only capability this module adds is grabbing
-//! the screen; decoding and otpauth parsing are entirely reused.
+//! Grabs the screen via the lightweight per-platform backend in
+//! [`crate::screengrab`] and hands each frame to `keyroost-qr`, which shares the
+//! same QR detection and otpauth parsing the file/paste import paths use — so
+//! every input path runs one decoder and one parser. The only capability this
+//! module adds is turning a captured screen into the first usable TOTP URI.
 //!
 //! Capture and decode happen locally — nothing is sent anywhere.
+
+use crate::screengrab::{self, Capture};
 
 /// Capture all screens and return the first `otpauth://totp` URI found, or an
 /// error describing why nothing usable was scanned. The returned string is the
 /// raw URI, to be fed to `keyroost_import::parse_otpauth` like a pasted URI.
 pub fn scan_screens_for_otpauth() -> Result<String, String> {
-    let screens =
-        screenshots::Screen::all().map_err(|e| format!("could not enumerate screens: {e}"))?;
-    if screens.is_empty() {
+    let captures = screengrab::capture_screens()?;
+    if captures.is_empty() {
         return Err("no screens available to scan".into());
     }
 
     let mut found_any_qr = false;
     let mut saw_hotp = false;
 
-    for screen in screens {
-        let image = match screen.capture() {
-            Ok(img) => img,
-            Err(_) => continue, // skip a screen we can't grab
+    for capture in &captures {
+        // Raw pixels decode directly; PNG frames reuse the file/paste decoder.
+        let texts = match capture {
+            Capture::Rgba {
+                width,
+                height,
+                data,
+            } => keyroost_qr::texts_from_rgba(*width, *height, data),
+            Capture::Png(bytes) => keyroost_qr::texts_from_image(bytes),
         };
-        // `screenshots` returns PNG-encoded bytes; keyroost-qr decodes PNG/JPEG.
-        let png = image.buffer();
-        let texts = match keyroost_qr::texts_from_image(png) {
+        let texts = match texts {
             Ok(t) => t,
-            Err(_) => continue,
+            Err(_) => continue, // nothing decodable on this screen
         };
         for text in texts.iter() {
             let trimmed = text.trim();

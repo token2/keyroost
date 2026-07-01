@@ -10,6 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 mod otp_pane;
 #[cfg(feature = "qr")]
 mod qrscan;
+#[cfg(feature = "qr")]
+mod screengrab;
 mod settings;
 mod ui;
 use otp_pane::OtpState;

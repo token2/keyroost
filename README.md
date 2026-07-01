@@ -565,6 +565,7 @@ commands are unchanged.
 | `keyroost-import` | `otpauth://` + Aegis / 2FAS / otpauth-list parsers | `serde`/`serde_json`, `scrypt`, `aes-gcm`, `base64`, `zeroize` (all behind `bulk`) |
 | `keyroost-qr` | QR 2FA import from PNG/JPEG screenshots, a live screen capture, and GA export batches (optional `qr` feature; built into the release + AppImage binaries) | `rqrr`, `png`, `jpeg-decoder`, `zeroize` |
 | `keyroost-winwebauthn` | Windows-only helper for the non-admin FIDO2 path: detect a FIDO key via the HID access-denied signal, open Windows' security-key settings, and relaunch elevated; inert on non-Windows | none |
+| `keyroost-screengrab` | Windows-only still screen capture (GDI `BitBlt`) for QR-from-screen; isolates the unsafe Win32 FFI from the GUI crate; inert on non-Windows | `windows-sys` |
 | `keyroostctl` | Command-line interface | `clap`, `clap_complete`, `clap_mangen`, `zeroize` |
 | `keyroost` | egui desktop GUI | `eframe`, `egui`, `arboard`, `zeroize` |
 
