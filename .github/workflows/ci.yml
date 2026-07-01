@@ -74,6 +74,14 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
+      # The `qr` screen-capture backend is cfg-gated per OS, and the matrix build
+      # above uses default features — so the Windows GDI path (hand-rolled Win32
+      # FFI in keyroost-screengrab) is otherwise compiled only by release.yml at
+      # tag time. Compile + lint it here so that FFI can't rot between releases.
+      - name: Clippy — qr screen-capture backend (Windows)
+        if: runner.os == 'Windows'
+        run: cargo clippy -p keyroost --features qr --all-targets --locked -- -D warnings
+
   # Surface dependencies the compiler will reject in a future Rust release.
   # Builds `--all-features` so every opt-in dep is covered — including the `qr`
   # feature's screen-capture backend and keyroost-hid's `hidapi-backend`, whose
