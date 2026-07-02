@@ -44,6 +44,18 @@ updates:
         versions: ['>=0.5']
       - dependency-name: getrandom
         versions: ['>=0.3']
+      # aes-gcm 0.11, scrypt 0.12, and p256 0.14 are the same next-generation
+      # wave (aes 0.9 / cipher 0.5 / digest 0.11 / elliptic-curve 0.14): the
+      # comment above already names them as part of the coupled stack, but they
+      # had no entries of their own, so dependabot kept proposing them solo
+      # (aes-gcm 0.11 arrived with CI red across the board). Move them with the
+      # whole stack, not one crate at a time.
+      - dependency-name: aes-gcm
+        versions: ['>=0.11']
+      - dependency-name: scrypt
+        versions: ['>=0.12']
+      - dependency-name: p256
+        versions: ['>=0.14']
       # eframe pins its own egui version, so the pair can only move in
       # lock-step, and a multi-version egui jump needs hand-migration of the
       # GUI code — an upgrade to do deliberately, not via single-crate bumps.
