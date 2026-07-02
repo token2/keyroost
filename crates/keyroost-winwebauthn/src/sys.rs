@@ -215,7 +215,7 @@ fn detect_fido_keys_impl(verbose: bool) -> (Vec<FidoKeyInfo>, Vec<String>) {
             // VID/PID via HidD_GetAttributes (works on zero-access handle).
             let mut attrs: HIDD_ATTRIBUTES = std::mem::zeroed();
             attrs.Size = std::mem::size_of::<HIDD_ATTRIBUTES>() as u32;
-            let (vid, pid) = if HidD_GetAttributes(handle, &mut attrs) != 0 {
+            let (vid, pid) = if HidD_GetAttributes(handle, &mut attrs) {
                 (Some(attrs.VendorID), Some(attrs.ProductID))
             } else {
                 (path_vid, path_pid)
@@ -224,7 +224,7 @@ fn detect_fido_keys_impl(verbose: bool) -> (Vec<FidoKeyInfo>, Vec<String>) {
             // Usage page via preparsed data + caps.
             let mut preparsed: PHIDP_PREPARSED_DATA = 0;
             let mut usage_page = 0u16;
-            if HidD_GetPreparsedData(handle, &mut preparsed) != 0 && preparsed != 0 {
+            if HidD_GetPreparsedData(handle, &mut preparsed) && preparsed != 0 {
                 let mut caps: HIDP_CAPS = std::mem::zeroed();
                 if HidP_GetCaps(preparsed, &mut caps) == HIDP_STATUS_SUCCESS {
                     usage_page = caps.UsagePage;
@@ -252,8 +252,7 @@ fn detect_fido_keys_impl(verbose: bool) -> (Vec<FidoKeyInfo>, Vec<String>) {
                     handle,
                     prod_buf.as_mut_ptr() as *mut _,
                     (prod_buf.len() * 2) as u32,
-                ) != 0
-                {
+                ) {
                     if let Some(end) = prod_buf.iter().position(|&c| c == 0) {
                         let s = String::from_utf16_lossy(&prod_buf[..end]);
                         if !s.is_empty() {
