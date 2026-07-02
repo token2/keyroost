@@ -118,6 +118,15 @@ cargo run -p keyroostctl -- --debug info
 cargo run -p keyroost
 ```
 
+## Release process
+
+- **Before cutting any release, prove the packaging on a test branch first.**
+  Push a throwaway branch that builds the **flatpak and the AppImage** and
+  confirm both come out green *before* the version bump / tag. Packaging pulls
+  from upstreams that drift independently of our code (the v0.7.3 flatpak broke
+  at release time because an upstream source was pruned); such breaks must
+  surface on a test branch, not during the release run.
+
 ## Commit style
 
 The repo uses descriptive commits oriented around *why*, not *what*. See
