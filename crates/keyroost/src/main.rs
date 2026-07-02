@@ -155,8 +155,6 @@ struct SecurityKeysState {
     /// Capacity snapshot computed at load/reload time (needs the device's
     /// getInfo, which only the worker thread holds).
     lb_capacity: Option<keyroost_ctap::large_blobs::BlobCapacity>,
-    /// Entry index awaiting an export-dialog result.
-    lb_export_idx: Option<usize>,
     /// Index of the entry currently expanded in the hex/ASCII viewer.
     lb_selected: Option<usize>,
     /// Pending "delete entry N" confirmation in the structured editor.
@@ -1309,9 +1307,10 @@ enum FileTarget {
     PivCert,
     /// PIV "Export certificate" destination (`piv.export_path`).
     PivExport,
-    /// Storage tab "Export…" destination for a large-blob entry
-    /// (`lb_export_idx` holds which entry).
-    LbExport,
+    /// Storage tab "Export…" destination for a large-blob entry. Carries the
+    /// entry index so a second Export click (or a cancelled dialog) can never
+    /// mismatch which entry a resolving dialog belongs to.
+    LbExport(usize),
 }
 
 impl App {
@@ -1385,31 +1384,43 @@ impl App {
                             FileTarget::PivCsr => self.piv.csr_path = text,
                             FileTarget::PivCert => self.piv.cert_path = text,
                             FileTarget::PivExport => self.piv.export_path = text,
-                            FileTarget::LbExport => {
-                                if let (Some(idx), Some(arr)) = (
-                                    self.security_keys.lb_export_idx.take(),
-                                    self.security_keys.large_blobs.as_ref(),
-                                ) {
-                                    if let Some(entry) = arr.entries.get(idx) {
-                                        use keyroost_ctap::large_blobs::EntryKind;
+                            FileTarget::LbExport(idx) => {
+                                use keyroost_ctap::large_blobs::EntryKind;
+                                // The array may have been reloaded, cleared, or
+                                // shrunk between the Export click and the dialog
+                                // resolving — fail loudly instead of writing the
+                                // wrong entry or silently doing nothing.
+                                let entry = self
+                                    .security_keys
+                                    .large_blobs
+                                    .as_ref()
+                                    .and_then(|arr| arr.entries.get(idx));
+                                self.security_keys.lb_status = Some(match entry {
+                                    None => {
+                                        format!("Export failed: entry {idx} no longer exists")
+                                    }
+                                    Some(entry) => {
                                         let bytes = match entry.classify() {
                                             EntryKind::SshCert { wire, .. } => {
                                                 keyroost_ctap::ssh_cert::to_cert_pub(&wire)
-                                                    .expect("classified cert must re-encode")
-                                                    .into_bytes()
+                                                    .map(String::into_bytes)
                                             }
-                                            _ => entry.ciphertext.clone(),
+                                            _ => Some(entry.ciphertext.clone()),
                                         };
-                                        self.security_keys.lb_status =
-                                            Some(match std::fs::write(&path, &bytes) {
+                                        match bytes {
+                                            None => "Export failed: could not re-encode \
+                                                     certificate"
+                                                .into(),
+                                            Some(bytes) => match std::fs::write(&path, &bytes) {
                                                 Ok(()) => format!(
                                                     "Exported entry {idx} ({} bytes) to {text}",
                                                     bytes.len()
                                                 ),
                                                 Err(e) => format!("Export failed: {e}"),
-                                            });
+                                            },
+                                        }
                                     }
-                                }
+                                });
                             }
                         }
                     }
@@ -4192,7 +4203,6 @@ impl App {
         // Large-blob state is per-key; drop it so the next key auto-loads fresh.
         self.security_keys.large_blobs = None;
         self.security_keys.lb_capacity = None;
-        self.security_keys.lb_export_idx = None;
         self.security_keys.lb_autoloaded = false;
         self.security_keys.lb_selected = None;
         self.security_keys.lb_editing = None;
@@ -8496,7 +8506,6 @@ impl App {
                         // Export is read-only, so it's always available
                         // regardless of session lock state.
                         if theme::button(ui, p, BtnKind::Ghost, "Export\u{2026}").clicked() {
-                            self.security_keys.lb_export_idx = Some(idx);
                             let is_cert =
                                 matches!(classification, EntryKind::SshCert { .. });
                             let default_name = if is_cert {
@@ -8505,7 +8514,7 @@ impl App {
                                 format!("large-blob-entry-{idx}.bin")
                             };
                             self.spawn_file_dialog(
-                                FileTarget::LbExport,
+                                FileTarget::LbExport(idx),
                                 true,
                                 &[("All files", &["*"])],
                                 Some(&default_name),
