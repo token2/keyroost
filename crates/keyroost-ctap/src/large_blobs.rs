@@ -664,6 +664,10 @@ mod tests {
         let note = LargeBlobEntry::from_text("hello");
         assert!(matches!(note.classify(), EntryKind::Note(t) if t == "hello"));
 
+        // A note whose body IS a cert line still classifies as a note.
+        let cert_note = LargeBlobEntry::from_text(FIXTURE_CERT_PUB);
+        assert!(matches!(cert_note.classify(), EntryKind::Note(t) if t == FIXTURE_CERT_PUB));
+
         // Wire-format certificate.
         let wire = base64_decode(FIXTURE_CERT_PUB.split_ascii_whitespace().nth(1).unwrap()).unwrap();
         let wire_entry = LargeBlobEntry { ciphertext: wire.clone(), nonce: vec![0; 12], orig_size: wire.len() as u64 };

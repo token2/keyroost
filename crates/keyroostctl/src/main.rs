@@ -5198,8 +5198,8 @@ fn run_fido_large_blob_list(
                 "[{}] {} bytes  ssh-cert  {} ({})",
                 i,
                 e.orig_size,
-                info.key_id,
-                info.principals.join(",")
+                sanitize_cert_field(&info.key_id),
+                sanitize_cert_field(&info.principals.join(","))
             ),
             EntryKind::Opaque => println!(
                 "[{}] {} bytes  opaque    {}",
@@ -5253,21 +5253,21 @@ fn run_fido_large_blob_get(
             );
             println!(
                 "  Type:        {} ({})",
-                info.key_type,
+                sanitize_cert_field(&info.key_type),
                 if info.cert_type == keyroost_ctap::ssh_cert::CERT_TYPE_USER {
                     "user"
                 } else {
                     "host"
                 }
             );
-            println!("  Key ID:      {}", info.key_id);
+            println!("  Key ID:      {}", sanitize_cert_field(&info.key_id));
             println!("  Serial:      {}", info.serial);
             println!(
                 "  Principals:  {}",
                 if info.principals.is_empty() {
                     "(any)".to_string()
                 } else {
-                    info.principals.join(", ")
+                    sanitize_cert_field(&info.principals.join(", "))
                 }
             );
             println!(
@@ -5275,14 +5275,16 @@ fn run_fido_large_blob_get(
                 keyroost_ctap::ssh_cert::format_validity(info.valid_after, info.valid_before)
             );
             for (n, v) in &info.critical_options {
+                let n = sanitize_cert_field(n);
                 if v.is_empty() {
                     println!("  Critical:    {n}");
                 } else {
+                    let v = sanitize_cert_field(v);
                     println!("  Critical:    {n}={v}");
                 }
             }
             for ext in &info.extensions {
-                println!("  Extension:   {ext}");
+                println!("  Extension:   {}", sanitize_cert_field(ext));
             }
             println!("\nExport with: keyroostctl fido large-blob export {index} <FILE> --as-cert");
         }
@@ -5313,7 +5315,7 @@ fn run_fido_large_blob_export(
     let bytes: Vec<u8> = if as_cert {
         match entry.classify() {
             EntryKind::SshCert { wire, .. } => keyroost_ctap::ssh_cert::to_cert_pub(&wire)
-                .expect("classified cert must re-encode")
+                .ok_or("could not re-encode certificate")?
                 .into_bytes(),
             _ => {
                 return Err(format!(
@@ -5471,6 +5473,13 @@ fn large_blob_bad_index(index: usize, len: usize) -> Box<dyn std::error::Error> 
     } else {
         format!("no entry {} — valid indices are 0..={}", index, len - 1).into()
     }
+}
+
+/// Flatten control characters out of an attacker-suppliable certificate
+/// string (key IDs, principals, options come from unverified cert bytes)
+/// so a hostile entry cannot inject terminal escape sequences.
+fn sanitize_cert_field(s: &str) -> String {
+    s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
 }
 
 /// A short, single-line preview of a note's text for the `list` view.
