@@ -5081,6 +5081,9 @@ fn open_and_read_large_blobs(
         return Err("device is U2F-only; CTAP2 large blobs not supported".into());
     }
     let info = keyroost_ctap::get_info(&mut dev)?;
+    if info.option("largeBlobs") != Some(true) {
+        return Err("this key does not support the FIDO2 large-blob store".into());
+    }
     let array = keyroost_ctap::large_blobs::read(&mut dev, &info)?;
     Ok((dev, info, array))
 }
