@@ -50,6 +50,7 @@ use crate::client_pin::PinUvAuthToken;
 use crate::cmd::{AuthenticatorInfo, CtapError};
 use crate::hid::CTAPHID_CBOR;
 use crate::pin::left16_sha256;
+use crate::ssh_cert;
 use crate::transport::CtapTransport;
 
 /// CTAP command byte for `authenticatorLargeBlobs`.
@@ -155,6 +156,44 @@ impl LargeBlobEntry {
     pub fn is_kr_note(&self) -> bool {
         self.ciphertext.starts_with(KR_NOTE_MAGIC)
     }
+
+    /// Classify this entry. Conservative by construction: the keyroost note
+    /// magic wins outright, certificate recognition requires a complete,
+    /// well-formed parse, and everything else is opaque.
+    pub fn classify(&self) -> EntryKind {
+        if let Some(text) = self.as_text() {
+            return EntryKind::Note(text);
+        }
+        if let Some(info) = ssh_cert::parse_wire(&self.ciphertext) {
+            return EntryKind::SshCert {
+                info,
+                wire: self.ciphertext.clone(),
+            };
+        }
+        if let Ok(s) = std::str::from_utf8(&self.ciphertext) {
+            if let Some((info, wire)) = ssh_cert::parse_text(s.trim()) {
+                return EntryKind::SshCert { info, wire };
+            }
+        }
+        EntryKind::Opaque
+    }
+}
+
+/// What a large-blob entry *is*, as far as keyroost can honestly tell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntryKind {
+    /// keyroost plaintext note (magic-prefixed).
+    Note(String),
+    /// A recognized OpenSSH certificate. `wire` holds the canonical binary
+    /// certificate (decoded from base64 when the entry stored the text form),
+    /// ready for export as a `-cert.pub`.
+    SshCert {
+        info: ssh_cert::SshCertInfo,
+        wire: Vec<u8>,
+    },
+    /// Anything unrecognized — treated as RP-owned AEAD data: shown raw,
+    /// never reinterpreted, never rewritten.
+    Opaque,
 }
 
 /// A parsed large-blob array: the structured entries plus the exact raw bytes
@@ -614,5 +653,44 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(arr.capacity(&info_small).free_bytes, 0);
+    }
+
+    #[test]
+    fn classify_note_ssh_cert_and_opaque() {
+        use crate::ssh_cert::tests_fixture::FIXTURE_CERT_PUB;
+        use keyroost_proto::codec::base64_decode;
+
+        // Note wins (even if a note happens to contain a cert line).
+        let note = LargeBlobEntry::from_text("hello");
+        assert!(matches!(note.classify(), EntryKind::Note(t) if t == "hello"));
+
+        // Wire-format certificate.
+        let wire = base64_decode(FIXTURE_CERT_PUB.split_ascii_whitespace().nth(1).unwrap()).unwrap();
+        let wire_entry = LargeBlobEntry { ciphertext: wire.clone(), nonce: vec![0; 12], orig_size: wire.len() as u64 };
+        match wire_entry.classify() {
+            EntryKind::SshCert { info, wire: w } => {
+                assert_eq!(info.key_id, "test-key-id");
+                assert_eq!(w, wire);
+            }
+            other => panic!("expected SshCert, got {other:?}"),
+        }
+
+        // Text-form certificate (a -cert.pub file dropped in verbatim).
+        let text_entry = LargeBlobEntry {
+            ciphertext: FIXTURE_CERT_PUB.as_bytes().to_vec(),
+            nonce: vec![0; 12],
+            orig_size: FIXTURE_CERT_PUB.len() as u64,
+        };
+        match text_entry.classify() {
+            EntryKind::SshCert { info, wire: w } => {
+                assert_eq!(info.serial, 42);
+                assert_eq!(w, wire); // canonical wire bytes, not the text
+            }
+            other => panic!("expected SshCert, got {other:?}"),
+        }
+
+        // Random RP bytes stay opaque.
+        let rp = LargeBlobEntry { ciphertext: vec![0xde, 0xad, 0xbe, 0xef], nonce: vec![1; 12], orig_size: 4 };
+        assert!(matches!(rp.classify(), EntryKind::Opaque));
     }
 }

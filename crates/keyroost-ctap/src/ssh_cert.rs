@@ -241,14 +241,19 @@ pub fn to_cert_pub(wire: &[u8]) -> Option<String> {
     Some(format!("{} {}\n", info.key_type, base64_encode(wire)))
 }
 
+/// Test fixture shared with large_blobs' classification tests.
 #[cfg(test)]
-mod tests {
-    use super::*;
-
+pub(crate) mod tests_fixture {
     /// Real ed25519 user certificate produced by ssh-keygen from throwaway
     /// keys (see the Tier A plan for the exact invocation). The base64 body
     /// is the wire-format certificate blob.
-    const FIXTURE_CERT_PUB: &str = "ssh-ed25519-cert-v01@openssh.com AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29tAAAAIFnHByOSs9oyjoM3FSMYa4CyEkl9qj7cPldTCWBGw3soAAAAIB8WYDicxYHAvQ5QE8w24ZO0pod+x5Y7Zcjdk8D3kOpZAAAAAAAAACoAAAABAAAAC3Rlc3Qta2V5LWlkAAAAEAAAAAVhbGljZQAAAANib2IAAAAAaVW5AAAAAABrNuyAAAAAJgAAAA5zb3VyY2UtYWRkcmVzcwAAABAAAAAMMTkyLjAuMi4wLzI0AAAAEgAAAApwZXJtaXQtcHR5AAAAAAAAAAAAAAAzAAAAC3NzaC1lZDI1NTE5AAAAIOkAWA6QeBu6LNDfyV4zAgonPK7XpSmq9aFdozDaQr76AAAAUwAAAAtzc2gtZWQyNTUxOQAAAEAEeDetmfpeDeQHbXOGfLlLg9XHjJQpaXg1foE9TuNXWP3Bx3oCk4Foa8S7VkuXtK0geecTqa4WZGF9dM6VSWgI user";
+    pub const FIXTURE_CERT_PUB: &str = "ssh-ed25519-cert-v01@openssh.com AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29tAAAAIFnHByOSs9oyjoM3FSMYa4CyEkl9qj7cPldTCWBGw3soAAAAIB8WYDicxYHAvQ5QE8w24ZO0pod+x5Y7Zcjdk8D3kOpZAAAAAAAAACoAAAABAAAAC3Rlc3Qta2V5LWlkAAAAEAAAAAVhbGljZQAAAANib2IAAAAAaVW5AAAAAABrNuyAAAAAJgAAAA5zb3VyY2UtYWRkcmVzcwAAABAAAAAMMTkyLjAuMi4wLzI0AAAAEgAAAApwZXJtaXQtcHR5AAAAAAAAAAAAAAAzAAAAC3NzaC1lZDI1NTE5AAAAIOkAWA6QeBu6LNDfyV4zAgonPK7XpSmq9aFdozDaQr76AAAAUwAAAAtzc2gtZWQyNTUxOQAAAEAEeDetmfpeDeQHbXOGfLlLg9XHjJQpaXg1foE9TuNXWP3Bx3oCk4Foa8S7VkuXtK0geecTqa4WZGF9dM6VSWgI user";
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::tests_fixture::FIXTURE_CERT_PUB;
 
     fn fixture_wire() -> Vec<u8> {
         let b64 = FIXTURE_CERT_PUB.split_ascii_whitespace().nth(1).unwrap();
