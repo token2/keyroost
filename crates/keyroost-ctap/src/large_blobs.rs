@@ -80,6 +80,22 @@ const CHECKSUM_LEN: usize = 16;
 const DEFAULT_MAX_MSG_SIZE: u64 = 1024;
 const MSG_SIZE_OVERHEAD: u64 = 64;
 
+/// Spec floor for `maxSerializedLargeBlobArray` when the authenticator
+/// supports large blobs but does not advertise the key (CTAP 2.1 §6.10).
+const SPEC_MIN_SERIALIZED_ARRAY: u64 = 1024;
+
+/// Space accounting for a large-blob array against an authenticator's
+/// advertised (or spec-minimum) storage. Sizes count the full serialized
+/// form — CBOR array plus the 16-byte checksum trailer — because that is
+/// what `maxSerializedLargeBlobArray` bounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlobCapacity {
+    pub max_bytes: u64,
+    pub used_bytes: u64,
+    pub free_bytes: u64,
+    pub entry_count: usize,
+}
+
 /// The empty large-blob array: an empty CBOR array (`0x80`) followed by the
 /// 16-byte checksum of that single byte. Writing this effectively clears the
 /// store. Computed lazily to avoid a const-fn hash.
@@ -185,6 +201,21 @@ impl LargeBlobArray {
             entries,
             raw_array: Vec::new(),
         })
+    }
+
+    /// Compute capacity from the entries as currently held (re-serialized,
+    /// so it stays correct after local adds/edits that haven't been written).
+    pub fn capacity(&self, info: &AuthenticatorInfo) -> BlobCapacity {
+        let used = self.serialize_with_checksum().len() as u64;
+        let max = info
+            .max_serialized_large_blob_array
+            .unwrap_or(SPEC_MIN_SERIALIZED_ARRAY);
+        BlobCapacity {
+            max_bytes: max,
+            used_bytes: used,
+            free_bytes: max.saturating_sub(used),
+            entry_count: self.entries.len(),
+        }
     }
 }
 
@@ -547,5 +578,41 @@ mod tests {
         assert!(arr.with_replaced_note(0, "hack").is_none());
         // Out-of-range index is refused.
         assert!(arr.with_replaced_note(9, "x").is_none());
+    }
+
+    #[test]
+    fn capacity_of_empty_array() {
+        let arr = LargeBlobArray { entries: Vec::new(), raw_array: Vec::new() };
+        let info = AuthenticatorInfo::default(); // no 0x0B advertised -> spec minimum
+        let cap = arr.capacity(&info);
+        // Empty CBOR array (0x80, 1 byte) + 16-byte checksum trailer.
+        assert_eq!(cap.used_bytes, 17);
+        assert_eq!(cap.max_bytes, 1024);
+        assert_eq!(cap.free_bytes, 1024 - 17);
+        assert_eq!(cap.entry_count, 0);
+    }
+
+    #[test]
+    fn capacity_uses_advertised_max_and_saturates() {
+        let arr = LargeBlobArray {
+            entries: vec![LargeBlobEntry::from_text("hello")],
+            raw_array: Vec::new(),
+        };
+        let info = AuthenticatorInfo {
+            max_serialized_large_blob_array: Some(4096),
+            ..Default::default()
+        };
+        let cap = arr.capacity(&info);
+        assert_eq!(cap.max_bytes, 4096);
+        assert_eq!(cap.used_bytes, arr.serialize_with_checksum().len() as u64);
+        assert_eq!(cap.free_bytes, cap.max_bytes - cap.used_bytes);
+        assert_eq!(cap.entry_count, 1);
+
+        // A max smaller than what's stored must not underflow.
+        let info_small = AuthenticatorInfo {
+            max_serialized_large_blob_array: Some(10),
+            ..Default::default()
+        };
+        assert_eq!(arr.capacity(&info_small).free_bytes, 0);
     }
 }
