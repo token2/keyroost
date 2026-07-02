@@ -5,6 +5,8 @@
 //! critical options. It deliberately does NOT verify the CA signature; that
 //! is the relying server's job, not a display surface's.
 
+use keyroost_proto::codec::{base64_decode, base64_encode};
+
 /// Certificate type field values (PROTOCOL.certkeys).
 pub const CERT_TYPE_USER: u32 = 1;
 pub const CERT_TYPE_HOST: u32 = 2;
@@ -214,10 +216,34 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (y + i64::from(m <= 2), m, d)
 }
 
+/// Parse the text form of a certificate — the single `-cert.pub` line
+/// (`<type> <base64> [comment]`). Returns the decoded fields plus the raw
+/// wire blob so callers can export or re-store the canonical bytes. The
+/// declared type must match the type embedded in the blob.
+pub fn parse_text(s: &str) -> Option<(SshCertInfo, Vec<u8>)> {
+    let mut parts = s.split_ascii_whitespace();
+    let declared = parts.next()?;
+    if !declared.ends_with("-cert-v01@openssh.com") {
+        return None;
+    }
+    let wire = base64_decode(parts.next()?).ok()?;
+    let info = parse_wire(&wire)?;
+    if info.key_type != declared {
+        return None;
+    }
+    Some((info, wire))
+}
+
+/// Re-encode a wire-format certificate as the body of a `-cert.pub` file:
+/// `<type> <base64>\n`. Returns `None` if the bytes are not a certificate.
+pub fn to_cert_pub(wire: &[u8]) -> Option<String> {
+    let info = parse_wire(wire)?;
+    Some(format!("{} {}\n", info.key_type, base64_encode(wire)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use keyroost_proto::codec::base64_decode;
 
     /// Real ed25519 user certificate produced by ssh-keygen from throwaway
     /// keys (see the Tier A plan for the exact invocation). The base64 body
@@ -277,5 +303,39 @@ mod tests {
             format_validity(1767225600, 1798761600),
             "2026-01-01 00:00:00 UTC to 2027-01-01 00:00:00 UTC"
         );
+    }
+
+    #[test]
+    fn parses_text_form_and_roundtrips_to_cert_pub() {
+        let (info, wire) = parse_text(FIXTURE_CERT_PUB).unwrap();
+        assert_eq!(info.key_id, "test-key-id");
+        assert_eq!(wire, fixture_wire());
+
+        // Re-encoding the wire form yields a line OpenSSH accepts: same type,
+        // same base64 body (comment is not preserved — it isn't part of the
+        // certificate).
+        let line = to_cert_pub(&wire).unwrap();
+        let mut parts = line.split_ascii_whitespace();
+        assert_eq!(parts.next(), Some("ssh-ed25519-cert-v01@openssh.com"));
+        assert_eq!(
+            parts.next(),
+            FIXTURE_CERT_PUB.split_ascii_whitespace().nth(1)
+        );
+        assert!(line.ends_with('\n'));
+        // And the re-encoded line parses back.
+        assert!(parse_text(&line).is_some());
+    }
+
+    #[test]
+    fn text_form_rejects_mismatch_and_garbage() {
+        // Declared type must match the type inside the blob.
+        let b64 = FIXTURE_CERT_PUB.split_ascii_whitespace().nth(1).unwrap();
+        let lied = format!("ssh-rsa-cert-v01@openssh.com {b64}");
+        assert!(parse_text(&lied).is_none());
+        // Ordinary public keys (not certs) are not recognized.
+        assert!(parse_text("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB8WYDicxYHAvQ5QE8w24ZO0pod+x5Y7Zcjdk8D3kOpZ user").is_none());
+        // Not base64 / not a cert at all.
+        assert!(parse_text("hello world").is_none());
+        assert!(parse_text("").is_none());
     }
 }
