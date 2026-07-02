@@ -305,15 +305,40 @@ impl App {
                             .ok()
                             .map(|sn| sn.iter().map(|b| format!("{b:02x}")).collect::<String>())
                     };
-                    // Read the device config once; derive both the touch-HOTP
-                    // availability and the interface states from it. Skipped over
-                    // PC/SC (see above) — `dev_info` stays None, which the match
-                    // arms below already treat as "unknown" rather than blocking.
-                    let dev_info = if pcsc {
-                        None
-                    } else {
-                        session.read_device_info().ok()
-                    };
+                    // Enumerate the codes FIRST. The list is the primary result
+                    // and must never be held hostage by the config read below —
+                    // over a T=0 contact reader READ_CONFIG can stall (~20s
+                    // transport timeout) or leave the applet mid-exchange, which
+                    // previously produced an empty list. Reading codes first means
+                    // any config trouble can only cost the (secondary) interface
+                    // toggle, never the codes.
+                    let now = unix_now();
+                    let entries = session.enumerate(now)?;
+                    let rows = entries
+                        .into_iter()
+                        .map(|e| OtpRow {
+                            app_name: e.app_name,
+                            account_name: e.account_name,
+                            type_str: keyroost_transport::otp_type_str(e.otp_type),
+                            algo_str: otp_algo_str(e.algorithm),
+                            button_required: e.button_required,
+                            code: e.code,
+                            period: e.timestep,
+                        })
+                        .collect();
+
+                    // Now read the device config for the interface states (which
+                    // drive the keyboard-HID / HID-HOTP toggle) and touch-HOTP
+                    // hints. Best-effort: `.ok()` swallows a failure so a reader
+                    // that can't answer leaves `dev_info` = None (toggle hidden),
+                    // exactly as before — and because it runs AFTER enumerate, a
+                    // stall or error here cannot affect the code list.
+                    //
+                    // Over the key's own CCID/NFC this returns the full 64-byte
+                    // block (verified on hardware), so the toggle appears. Over a
+                    // genuine T=0 contact reader it may time out; that only costs
+                    // the toggle, not the codes.
+                    let dev_info = session.read_device_info().ok();
                     let (touch_ok, touch_why): (Option<bool>, Option<&'static str>) =
                         match &dev_info {
                             Some(info) => {
@@ -352,20 +377,6 @@ impl App {
                             numpad: info.hotp_uses_numpad(),
                         })
                     });
-                    let now = unix_now();
-                    let entries = session.enumerate(now)?;
-                    let rows = entries
-                        .into_iter()
-                        .map(|e| OtpRow {
-                            app_name: e.app_name,
-                            account_name: e.account_name,
-                            type_str: keyroost_transport::otp_type_str(e.otp_type),
-                            algo_str: otp_algo_str(e.algorithm),
-                            button_required: e.button_required,
-                            code: e.code,
-                            period: e.timestep,
-                        })
-                        .collect();
                     Ok(OtpLoad {
                         rows,
                         active,
