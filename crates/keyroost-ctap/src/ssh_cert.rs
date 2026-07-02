@@ -1,0 +1,281 @@
+//! Read-only decoding of OpenSSH certificates (the `*-cert-v01@openssh.com`
+//! wire format described in OpenSSH's PROTOCOL.certkeys). This exists so the
+//! large-blob Storage views can *recognize and display* a certificate an SSH
+//! CA workflow parked on the key — type, key id, principals, validity,
+//! critical options. It deliberately does NOT verify the CA signature; that
+//! is the relying server's job, not a display surface's.
+
+/// Certificate type field values (PROTOCOL.certkeys).
+pub const CERT_TYPE_USER: u32 = 1;
+pub const CERT_TYPE_HOST: u32 = 2;
+
+/// The human-relevant fields of an OpenSSH certificate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SshCertInfo {
+    /// e.g. `ssh-ed25519-cert-v01@openssh.com`.
+    pub key_type: String,
+    pub serial: u64,
+    /// [`CERT_TYPE_USER`] or [`CERT_TYPE_HOST`].
+    pub cert_type: u32,
+    pub key_id: String,
+    pub principals: Vec<String>,
+    /// Unix seconds; 0 = no lower bound.
+    pub valid_after: u64,
+    /// Unix seconds; `u64::MAX` = no upper bound ("forever").
+    pub valid_before: u64,
+    /// `(name, value)` pairs; value is empty for flag-style options.
+    pub critical_options: Vec<(String, String)>,
+    /// Extension names (values are conventionally empty).
+    pub extensions: Vec<String>,
+}
+
+/// Cursor over SSH wire data: big-endian integers and u32-length-prefixed
+/// byte strings.
+struct Reader<'a> {
+    buf: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Reader<'a> {
+    fn new(buf: &'a [u8]) -> Self {
+        Reader { buf, pos: 0 }
+    }
+
+    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+        let end = self.pos.checked_add(n)?;
+        let out = self.buf.get(self.pos..end)?;
+        self.pos = end;
+        Some(out)
+    }
+
+    fn u32(&mut self) -> Option<u32> {
+        self.take(4).map(|b| u32::from_be_bytes(b.try_into().unwrap()))
+    }
+
+    fn u64(&mut self) -> Option<u64> {
+        self.take(8).map(|b| u64::from_be_bytes(b.try_into().unwrap()))
+    }
+
+    fn bytes(&mut self) -> Option<&'a [u8]> {
+        let n = self.u32()? as usize;
+        self.take(n)
+    }
+
+    fn string(&mut self) -> Option<String> {
+        std::str::from_utf8(self.bytes()?).ok().map(str::to_owned)
+    }
+
+    fn done(&self) -> bool {
+        self.pos == self.buf.len()
+    }
+}
+
+/// How many wire fields the embedded public key occupies for each supported
+/// certificate type (they sit between the nonce and the serial). `mpint`s and
+/// `string`s share the same length-prefixed wire shape, so a count suffices.
+fn pubkey_field_count(key_type: &str) -> Option<usize> {
+    Some(match key_type {
+        "ssh-ed25519-cert-v01@openssh.com" => 1, // pk
+        "ssh-rsa-cert-v01@openssh.com" => 2,     // e, n
+        "ecdsa-sha2-nistp256-cert-v01@openssh.com"
+        | "ecdsa-sha2-nistp384-cert-v01@openssh.com"
+        | "ecdsa-sha2-nistp521-cert-v01@openssh.com" => 2, // curve, point
+        "sk-ssh-ed25519-cert-v01@openssh.com" => 2, // pk, application
+        "sk-ecdsa-sha2-nistp256-cert-v01@openssh.com" => 3, // curve, point, application
+        _ => return None,
+    })
+}
+
+/// Parse a wire-format OpenSSH certificate. Returns `None` on anything that
+/// is not a complete, well-formed certificate of a supported type — including
+/// trailing bytes — so this can double as a classifier over arbitrary
+/// large-blob entry bytes without false positives.
+pub fn parse_wire(blob: &[u8]) -> Option<SshCertInfo> {
+    let mut r = Reader::new(blob);
+    let key_type = r.string()?;
+    let pubkey_fields = pubkey_field_count(&key_type)?;
+    let _nonce = r.bytes()?;
+    for _ in 0..pubkey_fields {
+        r.bytes()?;
+    }
+    let serial = r.u64()?;
+    let cert_type = r.u32()?;
+    if cert_type != CERT_TYPE_USER && cert_type != CERT_TYPE_HOST {
+        return None;
+    }
+    let key_id = r.string()?;
+    let principals = packed_strings(r.bytes()?)?;
+    let valid_after = r.u64()?;
+    let valid_before = r.u64()?;
+    let critical_options = packed_pairs(r.bytes()?)?;
+    let extensions = packed_pairs(r.bytes()?)?
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    let _reserved = r.bytes()?;
+    let _signature_key = r.bytes()?;
+    let _signature = r.bytes()?;
+    if !r.done() {
+        return None;
+    }
+    Some(SshCertInfo {
+        key_type,
+        serial,
+        cert_type,
+        key_id,
+        principals,
+        valid_after,
+        valid_before,
+        critical_options,
+        extensions,
+    })
+}
+
+/// A buffer holding zero or more concatenated wire strings (the principals
+/// section).
+fn packed_strings(buf: &[u8]) -> Option<Vec<String>> {
+    let mut r = Reader::new(buf);
+    let mut out = Vec::new();
+    while !r.done() {
+        out.push(r.string()?);
+    }
+    Some(out)
+}
+
+/// A buffer holding zero or more `(string name, string data)` tuples, where
+/// `data` is either empty or itself a single wire string (the critical
+/// options and extensions sections).
+fn packed_pairs(buf: &[u8]) -> Option<Vec<(String, String)>> {
+    let mut r = Reader::new(buf);
+    let mut out = Vec::new();
+    while !r.done() {
+        let name = r.string()?;
+        let data = r.bytes()?;
+        let value = if data.is_empty() {
+            String::new()
+        } else {
+            let mut inner = Reader::new(data);
+            let v = inner.string()?;
+            if !inner.done() {
+                return None;
+            }
+            v
+        };
+        out.push((name, value));
+    }
+    Some(out)
+}
+
+/// Render a Unix timestamp as `YYYY-MM-DD HH:MM:SS UTC` without pulling in a
+/// date crate. Civil-from-days per Howard Hinnant's algorithm.
+pub fn format_timestamp(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let (y, m, d) = civil_from_days(days);
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
+        y,
+        m,
+        d,
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
+}
+
+/// Human validity window. OpenSSH treats `(0, u64::MAX)` as unbounded.
+pub fn format_validity(valid_after: u64, valid_before: u64) -> String {
+    if valid_after == 0 && valid_before == u64::MAX {
+        return "always valid".to_string();
+    }
+    let from = if valid_after == 0 {
+        "beginning of time".to_string()
+    } else {
+        format_timestamp(valid_after)
+    };
+    let to = if valid_before == u64::MAX {
+        "forever".to_string()
+    } else {
+        format_timestamp(valid_before)
+    };
+    format!("{from} to {to}")
+}
+
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (y + i64::from(m <= 2), m, d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use keyroost_proto::codec::base64_decode;
+
+    /// Real ed25519 user certificate produced by ssh-keygen from throwaway
+    /// keys (see the Tier A plan for the exact invocation). The base64 body
+    /// is the wire-format certificate blob.
+    const FIXTURE_CERT_PUB: &str = "ssh-ed25519-cert-v01@openssh.com AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29tAAAAIFnHByOSs9oyjoM3FSMYa4CyEkl9qj7cPldTCWBGw3soAAAAIB8WYDicxYHAvQ5QE8w24ZO0pod+x5Y7Zcjdk8D3kOpZAAAAAAAAACoAAAABAAAAC3Rlc3Qta2V5LWlkAAAAEAAAAAVhbGljZQAAAANib2IAAAAAaVW5AAAAAABrNuyAAAAAJgAAAA5zb3VyY2UtYWRkcmVzcwAAABAAAAAMMTkyLjAuMi4wLzI0AAAAEgAAAApwZXJtaXQtcHR5AAAAAAAAAAAAAAAzAAAAC3NzaC1lZDI1NTE5AAAAIOkAWA6QeBu6LNDfyV4zAgonPK7XpSmq9aFdozDaQr76AAAAUwAAAAtzc2gtZWQyNTUxOQAAAEAEeDetmfpeDeQHbXOGfLlLg9XHjJQpaXg1foE9TuNXWP3Bx3oCk4Foa8S7VkuXtK0geecTqa4WZGF9dM6VSWgI user";
+
+    fn fixture_wire() -> Vec<u8> {
+        let b64 = FIXTURE_CERT_PUB.split_ascii_whitespace().nth(1).unwrap();
+        base64_decode(b64).unwrap()
+    }
+
+    #[test]
+    fn parses_real_ed25519_user_cert() {
+        let info = parse_wire(&fixture_wire()).unwrap();
+        assert_eq!(info.key_type, "ssh-ed25519-cert-v01@openssh.com");
+        assert_eq!(info.serial, 42);
+        assert_eq!(info.cert_type, CERT_TYPE_USER);
+        assert_eq!(info.key_id, "test-key-id");
+        assert_eq!(info.principals, vec!["alice".to_string(), "bob".to_string()]);
+        assert_eq!(info.valid_after, 1767225600);
+        assert_eq!(info.valid_before, 1798761600);
+        assert_eq!(
+            info.critical_options,
+            vec![("source-address".to_string(), "192.0.2.0/24".to_string())]
+        );
+        assert_eq!(info.extensions, vec!["permit-pty".to_string()]);
+    }
+
+    #[test]
+    fn rejects_non_certificates() {
+        // Not even a length-prefixed string.
+        assert!(parse_wire(&[0xde, 0xad, 0xbe, 0xef]).is_none());
+        // Empty input.
+        assert!(parse_wire(&[]).is_none());
+        // A valid-looking type string but nothing after it.
+        let mut b = Vec::new();
+        b.extend_from_slice(&32u32.to_be_bytes());
+        b.extend_from_slice(b"ssh-ed25519-cert-v01@openssh.com");
+        assert!(parse_wire(&b).is_none());
+        // Truncated real cert: cut the last 10 bytes off.
+        let wire = fixture_wire();
+        assert!(parse_wire(&wire[..wire.len() - 10]).is_none());
+        // Trailing junk after a real cert must also be rejected (strictness
+        // keeps classification from matching almost-certs).
+        let mut padded = fixture_wire();
+        padded.push(0x00);
+        assert!(parse_wire(&padded).is_none());
+    }
+
+    #[test]
+    fn formats_timestamps_and_validity() {
+        assert_eq!(format_timestamp(1767225600), "2026-01-01 00:00:00 UTC");
+        assert_eq!(format_timestamp(0), "1970-01-01 00:00:00 UTC");
+        // OpenSSH convention: the all-1s valid_before means "forever".
+        assert_eq!(format_validity(0, u64::MAX), "always valid");
+        assert_eq!(
+            format_validity(1767225600, 1798761600),
+            "2026-01-01 00:00:00 UTC to 2027-01-01 00:00:00 UTC"
+        );
+    }
+}

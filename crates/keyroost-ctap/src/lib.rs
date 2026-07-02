@@ -21,6 +21,7 @@ pub mod cred_mgmt;
 pub mod hid;
 pub mod large_blobs;
 pub mod pin;
+pub mod ssh_cert;
 pub mod transport;
 
 pub use bio_enroll::{BioEnrollment, CaptureStatus, Enrollment, SensorInfo};

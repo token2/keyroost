@@ -1925,6 +1925,7 @@ dependencies = [
  "hidapi",
  "hmac",
  "keyroost-hid",
+ "keyroost-proto",
  "p256",
  "rand_core",
  "sha2",
