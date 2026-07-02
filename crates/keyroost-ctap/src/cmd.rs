@@ -181,6 +181,11 @@ pub struct AuthenticatorInfo {
     pub force_pin_change: Option<bool>,
     pub min_pin_length: Option<u64>,
     pub firmware_version: Option<u64>,
+    /// `maxSerializedLargeBlobArray` (getInfo key 0x0B): the maximum size, in
+    /// bytes, of the serialized large-blob array this authenticator stores —
+    /// including the 16-byte checksum trailer. Spec minimum is 1024 when the
+    /// `largeBlobs` option is supported; absent on keys without large blobs.
+    pub max_serialized_large_blob_array: Option<u64>,
 }
 
 impl AuthenticatorInfo {
@@ -249,6 +254,7 @@ pub fn parse_authenticator_info(v: &Value) -> Result<AuthenticatorInfo, CtapErro
             0x07 => info.max_credential_count_in_list = val.as_uint(),
             0x08 => info.max_credential_id_length = val.as_uint(),
             0x09 => info.transports = collect_strings(val),
+            0x0b => info.max_serialized_large_blob_array = val.as_uint(),
             0x0C => info.force_pin_change = val.as_bool(),
             0x0D => info.min_pin_length = val.as_uint(),
             0x0E => info.firmware_version = val.as_uint(),
@@ -382,5 +388,20 @@ mod tests {
         let v = Value::Map(vec![(Value::UInt(3), Value::Bytes(vec![0x11; 8]))]);
         let info = parse_authenticator_info(&v).unwrap();
         assert_eq!(info.aaguid, [0u8; 16]);
+    }
+
+    #[test]
+    fn parses_max_serialized_large_blob_array() {
+        // CTAP2.1 authenticatorGetInfo key 0x0B.
+        let v = Value::Map(vec![(Value::UInt(0x0b), Value::UInt(2048))]);
+        let info = parse_authenticator_info(&v).unwrap();
+        assert_eq!(info.max_serialized_large_blob_array, Some(2048));
+    }
+
+    #[test]
+    fn max_serialized_large_blob_array_defaults_to_none() {
+        let v = Value::Map(vec![]);
+        let info = parse_authenticator_info(&v).unwrap();
+        assert_eq!(info.max_serialized_large_blob_array, None);
     }
 }
