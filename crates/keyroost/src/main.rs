@@ -152,6 +152,11 @@ struct SecurityKeysState {
     subview: FidoSubview,
     /// Cached large-blob array, read on demand. `None` until first load.
     large_blobs: Option<keyroost_ctap::large_blobs::LargeBlobArray>,
+    /// Capacity snapshot computed at load/reload time (needs the device's
+    /// getInfo, which only the worker thread holds).
+    lb_capacity: Option<keyroost_ctap::large_blobs::BlobCapacity>,
+    /// Entry index awaiting an export-dialog result.
+    lb_export_idx: Option<usize>,
     /// Index of the entry currently expanded in the hex/ASCII viewer.
     lb_selected: Option<usize>,
     /// Pending "delete entry N" confirmation in the structured editor.
@@ -1304,6 +1309,9 @@ enum FileTarget {
     PivCert,
     /// PIV "Export certificate" destination (`piv.export_path`).
     PivExport,
+    /// Storage tab "Export…" destination for a large-blob entry
+    /// (`lb_export_idx` holds which entry).
+    LbExport,
 }
 
 impl App {
@@ -1377,6 +1385,32 @@ impl App {
                             FileTarget::PivCsr => self.piv.csr_path = text,
                             FileTarget::PivCert => self.piv.cert_path = text,
                             FileTarget::PivExport => self.piv.export_path = text,
+                            FileTarget::LbExport => {
+                                if let (Some(idx), Some(arr)) = (
+                                    self.security_keys.lb_export_idx.take(),
+                                    self.security_keys.large_blobs.as_ref(),
+                                ) {
+                                    if let Some(entry) = arr.entries.get(idx) {
+                                        use keyroost_ctap::large_blobs::EntryKind;
+                                        let bytes = match entry.classify() {
+                                            EntryKind::SshCert { wire, .. } => {
+                                                keyroost_ctap::ssh_cert::to_cert_pub(&wire)
+                                                    .expect("classified cert must re-encode")
+                                                    .into_bytes()
+                                            }
+                                            _ => entry.ciphertext.clone(),
+                                        };
+                                        self.security_keys.lb_status =
+                                            Some(match std::fs::write(&path, &bytes) {
+                                                Ok(()) => format!(
+                                                    "Exported entry {idx} ({} bytes) to {text}",
+                                                    bytes.len()
+                                                ),
+                                                Err(e) => format!("Export failed: {e}"),
+                                            });
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -4157,6 +4191,8 @@ impl App {
         self.security_keys.error = None;
         // Large-blob state is per-key; drop it so the next key auto-loads fresh.
         self.security_keys.large_blobs = None;
+        self.security_keys.lb_capacity = None;
+        self.security_keys.lb_export_idx = None;
         self.security_keys.lb_autoloaded = false;
         self.security_keys.lb_selected = None;
         self.security_keys.lb_editing = None;
@@ -7875,7 +7911,13 @@ impl App {
         let loaded = self.security_keys.large_blobs.clone();
 
         self.spawn_job("Saving to large blobs\u{2026}", move || {
-            let result = (|| -> Result<keyroost_ctap::large_blobs::LargeBlobArray, String> {
+            let result = (|| -> Result<
+                (
+                    keyroost_ctap::large_blobs::LargeBlobArray,
+                    keyroost_ctap::large_blobs::BlobCapacity,
+                ),
+                String,
+            > {
                 let (mut dev, cbor, _init) = open_fido(&target)?;
                 if !cbor {
                     return Err("device is U2F-only".into());
@@ -7902,13 +7944,17 @@ impl App {
                 keyroost_ctap::large_blobs::write(&mut dev, &info, &token, &serialized)
                     .map_err(|e| e.to_string())?;
 
-                keyroost_ctap::large_blobs::read(&mut dev, &info).map_err(|e| e.to_string())
+                let array =
+                    keyroost_ctap::large_blobs::read(&mut dev, &info).map_err(|e| e.to_string())?;
+                let cap = array.capacity(&info);
+                Ok((array, cap))
             })();
 
             Box::new(move |app: &mut App| match result {
-                Ok(array) => {
+                Ok((array, cap)) => {
                     let n = array.entries.len();
                     app.security_keys.large_blobs = Some(array);
+                    app.security_keys.lb_capacity = Some(cap);
                     app.security_keys.lb_new_text.clear();
                     app.security_keys.lb_show_add = false;
                     app.security_keys.lb_status = Some(format!(
@@ -7939,7 +7985,13 @@ impl App {
         let pin = session.pin.clone();
 
         self.spawn_job("Saving edit to large blobs\u{2026}", move || {
-            let result = (|| -> Result<keyroost_ctap::large_blobs::LargeBlobArray, String> {
+            let result = (|| -> Result<
+                (
+                    keyroost_ctap::large_blobs::LargeBlobArray,
+                    keyroost_ctap::large_blobs::BlobCapacity,
+                ),
+                String,
+            > {
                 let (mut dev, cbor, _init) = open_fido(&target)?;
                 if !cbor {
                     return Err("device is U2F-only".into());
@@ -7967,12 +8019,16 @@ impl App {
                 keyroost_ctap::large_blobs::write(&mut dev, &info, &token, &serialized)
                     .map_err(|e| e.to_string())?;
 
-                keyroost_ctap::large_blobs::read(&mut dev, &info).map_err(|e| e.to_string())
+                let array =
+                    keyroost_ctap::large_blobs::read(&mut dev, &info).map_err(|e| e.to_string())?;
+                let cap = array.capacity(&info);
+                Ok((array, cap))
             })();
 
             Box::new(move |app: &mut App| match result {
-                Ok(array) => {
+                Ok((array, cap)) => {
                     app.security_keys.large_blobs = Some(array);
+                    app.security_keys.lb_capacity = Some(cap);
                     app.security_keys.lb_editing = None;
                     app.security_keys.lb_edit_text.clear();
                     app.security_keys.lb_status = Some("Note updated.".into());
@@ -7992,18 +8048,28 @@ impl App {
             self.security_keys.lb_status = Some("No FIDO key selected.".into());
             return;
         };
-        let result = (|| -> Result<keyroost_ctap::large_blobs::LargeBlobArray, String> {
+        let result = (|| -> Result<
+            (
+                keyroost_ctap::large_blobs::LargeBlobArray,
+                keyroost_ctap::large_blobs::BlobCapacity,
+            ),
+            String,
+        > {
             let (mut dev, cbor, _init) = open_fido(&target)?;
             if !cbor {
                 return Err("device is U2F-only".into());
             }
             let info = keyroost_ctap::get_info(&mut dev).map_err(|e| e.to_string())?;
-            keyroost_ctap::large_blobs::read(&mut dev, &info).map_err(|e| e.to_string())
+            let array =
+                keyroost_ctap::large_blobs::read(&mut dev, &info).map_err(|e| e.to_string())?;
+            let cap = array.capacity(&info);
+            Ok((array, cap))
         })();
         match result {
-            Ok(array) => {
+            Ok((array, cap)) => {
                 let n = array.entries.len();
                 self.security_keys.large_blobs = Some(array);
+                self.security_keys.lb_capacity = Some(cap);
                 self.security_keys.lb_selected = None;
                 self.security_keys.lb_status = Some(format!(
                     "Loaded {n} entr{}.",
@@ -8045,7 +8111,13 @@ impl App {
         let target_entry = array.entries[idx].clone();
 
         self.spawn_job("Updating large blobs\u{2026}", move || {
-            let result = (|| -> Result<keyroost_ctap::large_blobs::LargeBlobArray, String> {
+            let result = (|| -> Result<
+                (
+                    keyroost_ctap::large_blobs::LargeBlobArray,
+                    keyroost_ctap::large_blobs::BlobCapacity,
+                ),
+                String,
+            > {
                 let (mut dev, cbor, _init) = open_fido(&target)?;
                 if !cbor {
                     return Err("device is U2F-only".into());
@@ -8081,13 +8153,17 @@ impl App {
                     .map_err(|e| e.to_string())?;
 
                 // Read back so the view reflects the authenticator's actual state.
-                keyroost_ctap::large_blobs::read(&mut dev, &info).map_err(|e| e.to_string())
+                let array =
+                    keyroost_ctap::large_blobs::read(&mut dev, &info).map_err(|e| e.to_string())?;
+                let cap = array.capacity(&info);
+                Ok((array, cap))
             })();
 
             Box::new(move |app: &mut App| match result {
-                Ok(array) => {
+                Ok((array, cap)) => {
                     let n = array.entries.len();
                     app.security_keys.large_blobs = Some(array);
+                    app.security_keys.lb_capacity = Some(cap);
                     app.security_keys.lb_selected = None;
                     app.security_keys.lb_status = Some(format!("Entry deleted. {n} remaining."));
                     app.security_keys.error = None;
@@ -8124,7 +8200,13 @@ impl App {
         let new_entries = Vec::new();
 
         self.spawn_job("Clearing large blobs\u{2026}", move || {
-            let result = (|| -> Result<keyroost_ctap::large_blobs::LargeBlobArray, String> {
+            let result = (|| -> Result<
+                (
+                    keyroost_ctap::large_blobs::LargeBlobArray,
+                    keyroost_ctap::large_blobs::BlobCapacity,
+                ),
+                String,
+            > {
                 let (mut dev, cbor, _init) = open_fido(&target)?;
                 if !cbor {
                     return Err("device is U2F-only".into());
@@ -8147,13 +8229,17 @@ impl App {
                     .map_err(|e| e.to_string())?;
 
                 // Read back so the view reflects the authenticator's actual state.
-                keyroost_ctap::large_blobs::read(&mut dev, &info).map_err(|e| e.to_string())
+                let array =
+                    keyroost_ctap::large_blobs::read(&mut dev, &info).map_err(|e| e.to_string())?;
+                let cap = array.capacity(&info);
+                Ok((array, cap))
             })();
 
             Box::new(move |app: &mut App| match result {
-                Ok(array) => {
+                Ok((array, cap)) => {
                     let n = array.entries.len();
                     app.security_keys.large_blobs = Some(array);
+                    app.security_keys.lb_capacity = Some(cap);
                     app.security_keys.lb_selected = None;
                     app.security_keys.lb_status =
                         Some(format!("Storage cleared. {n} entries remaining."));
@@ -8242,6 +8328,35 @@ impl App {
             .color(p.txt3),
         );
 
+        if let Some(cap) = self.security_keys.lb_capacity {
+            ui.add_space(8.0);
+            let frac = if cap.max_bytes == 0 {
+                0.0
+            } else {
+                (cap.used_bytes as f32 / cap.max_bytes as f32).clamp(0.0, 1.0)
+            };
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::ProgressBar::new(frac)
+                        .desired_width(160.0)
+                        .desired_height(8.0),
+                );
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} of {} bytes used \u{00b7} {} free \u{00b7} {} {}",
+                        cap.used_bytes,
+                        cap.max_bytes,
+                        cap.free_bytes,
+                        cap.entry_count,
+                        if cap.entry_count == 1 { "entry" } else { "entries" },
+                    ))
+                    .font(theme::f_reg(11.5))
+                    .color(p.txt2),
+                );
+            });
+        }
+
         if let Some(status) = &self.security_keys.lb_status {
             ui.add_space(6.0);
             ui.label(
@@ -8325,7 +8440,12 @@ impl App {
         let editing = self.security_keys.lb_editing;
         for (idx, entry) in array.entries.iter().enumerate() {
             theme::card_frame(p).show(ui, |ui| {
-                let note_text = entry.as_text();
+                use keyroost_ctap::large_blobs::EntryKind;
+                let classification = entry.classify();
+                let note_text = match &classification {
+                    EntryKind::Note(text) => Some(text.clone()),
+                    _ => None,
+                };
                 ui.horizontal(|ui| {
                     let title = if note_text.is_some() {
                         format!("Note {}", idx + 1)
@@ -8338,15 +8458,18 @@ impl App {
                             .color(p.txt),
                     );
                     ui.add_space(8.0);
-                    let meta = if note_text.is_some() {
-                        "keyroost text note".to_string()
-                    } else {
-                        format!(
+                    let meta = match &classification {
+                        EntryKind::Note(_) => "keyroost text note".to_string(),
+                        EntryKind::SshCert { .. } => format!(
+                            "ssh-cert \u{00b7} {} bytes \u{00b7} relying-party data",
+                            entry.ciphertext.len(),
+                        ),
+                        EntryKind::Opaque => format!(
                             "{} bytes ciphertext \u{00b7} {}-byte nonce \u{00b7} origSize {} \u{00b7} relying-party data",
                             entry.ciphertext.len(),
                             entry.nonce.len(),
                             entry.orig_size,
-                        )
+                        ),
                     };
                     ui.label(
                         egui::RichText::new(meta)
@@ -8370,10 +8493,31 @@ impl App {
                         {
                             start_edit = Some((idx, note_text.clone().unwrap_or_default()));
                         }
+                        // Export is read-only, so it's always available
+                        // regardless of session lock state.
+                        if theme::button(ui, p, BtnKind::Ghost, "Export\u{2026}").clicked() {
+                            self.security_keys.lb_export_idx = Some(idx);
+                            let is_cert =
+                                matches!(classification, EntryKind::SshCert { .. });
+                            let default_name = if is_cert {
+                                format!("entry-{idx}-cert.pub")
+                            } else {
+                                format!("large-blob-entry-{idx}.bin")
+                            };
+                            self.spawn_file_dialog(
+                                FileTarget::LbExport,
+                                true,
+                                &[("All files", &["*"])],
+                                Some(&default_name),
+                            );
+                        }
                     });
                 });
                 // keyroost notes: inline editor when editing this entry, else
-                // the decoded text read-only.
+                // the decoded text read-only. SSH certificates get a parsed
+                // field-by-field view; anything else (opaque RP data) shows
+                // nothing extra here — its bytes remain available via "View
+                // bytes" below.
                 if editing == Some(idx) {
                     ui.add_space(6.0);
                     ui.add(
@@ -8410,6 +8554,63 @@ impl App {
                             .font(theme::f_reg(12.5))
                             .color(p.txt),
                     );
+                } else if let EntryKind::SshCert { info, .. } = &classification {
+                    ui.add_space(6.0);
+                    egui::Grid::new(format!("lb_cert_{idx}"))
+                        .num_columns(2)
+                        .spacing([12.0, 2.0])
+                        .show(ui, |ui| {
+                            let row = |ui: &mut egui::Ui, k: &str, v: String| {
+                                ui.label(
+                                    egui::RichText::new(k).font(theme::f_reg(11.5)).color(p.txt3),
+                                );
+                                ui.label(
+                                    egui::RichText::new(v).font(theme::f_reg(11.5)).color(p.txt),
+                                );
+                                ui.end_row();
+                            };
+                            let kind = if info.cert_type
+                                == keyroost_ctap::ssh_cert::CERT_TYPE_USER
+                            {
+                                "user"
+                            } else {
+                                "host"
+                            };
+                            row(ui, "Type", format!("{} ({kind})", info.key_type));
+                            row(ui, "Key ID", info.key_id.clone());
+                            row(ui, "Serial", info.serial.to_string());
+                            row(
+                                ui,
+                                "Principals",
+                                if info.principals.is_empty() {
+                                    "(any)".to_string()
+                                } else {
+                                    info.principals.join(", ")
+                                },
+                            );
+                            row(
+                                ui,
+                                "Valid",
+                                keyroost_ctap::ssh_cert::format_validity(
+                                    info.valid_after,
+                                    info.valid_before,
+                                ),
+                            );
+                            for (n, v) in &info.critical_options {
+                                row(
+                                    ui,
+                                    "Critical",
+                                    if v.is_empty() {
+                                        n.clone()
+                                    } else {
+                                        format!("{n}={v}")
+                                    },
+                                );
+                            }
+                            for ext in &info.extensions {
+                                row(ui, "Extension", ext.clone());
+                            }
+                        });
                 }
                 if selected == Some(idx) {
                     ui.add_space(8.0);
