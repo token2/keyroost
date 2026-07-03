@@ -163,7 +163,8 @@ pub fn parse_public_data(resp: &[u8]) -> Result<ProfilePublicData, PublicDataErr
     if resp[0] != 0x95 {
         return Err(PublicDataError::BadOuterTag);
     }
-    if resp[1] as usize != resp.len() - 2 {
+    // Outer length must cover exactly the nested TLV: `70 1D` + 29 bytes.
+    if resp[1] != 0x1F {
         return Err(PublicDataError::BadOuterLength);
     }
     if resp[2] != 0x70 {
@@ -172,8 +173,12 @@ pub fn parse_public_data(resp: &[u8]) -> Result<ProfilePublicData, PublicDataErr
     if resp[3] != 0x1D {
         return Err(PublicDataError::BadInnerLength);
     }
+    // Declared lengths vs the actual buffer: a well-formed response is
+    // exactly 33 bytes (4-byte envelope + 29-byte body).
+    if resp.len() != 33 {
+        return Err(PublicDataError::BadOuterLength);
+    }
     let body = &resp[4..];
-    debug_assert_eq!(body.len(), 29); // guaranteed by the two length checks
     let raw_title = &body[1..17];
     let title_len = raw_title.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
     let title = if title_len == 0 {
