@@ -19,7 +19,8 @@
 use std::fmt;
 
 use keyroost_proto::commands::{
-    self, derive_sm4_key, sw_auth_failed, sw_ok, Command, ProfileConfig,
+    self, derive_sm4_key, sw_auth_failed, sw_ok, sw_completed, Command, ProfileConfig,
+    ProfilePublicData, PublicDataError,
 };
 use pcsc::{
     Attribute, Card, Context, Error as PcscError, Protocols, ReaderState, Scope, ShareMode, State,
@@ -76,6 +77,8 @@ pub enum TransportError {
     },
     /// Response payload had unexpected structure.
     MalformedResponse(&'static str),
+    /// The per-profile public block failed strict envelope validation.
+    PublicData(PublicDataError),
     /// An OATH applet response could not be parsed.
     OathParse(keyroost_oath::ParseError),
     /// The OATH applet rejected the supplied password.
@@ -158,6 +161,9 @@ impl fmt::Display for TransportError {
                 )
             }
             TransportError::MalformedResponse(s) => write!(f, "malformed response: {}", s),
+            TransportError::PublicData(e) => {
+                write!(f, "malformed per-profile public block: {}", e)
+            }
             TransportError::OathParse(e) => write!(f, "OATH response parse error: {}", e),
             TransportError::OathPasswordRejected => {
                 write!(f, "OATH applet rejected the password (wrong password)")
@@ -234,6 +240,15 @@ impl From<pcsc::Error> for TransportError {
     fn from(e: pcsc::Error) -> Self {
         TransportError::Pcsc(e)
     }
+}
+
+/// Outcome of a per-profile seed delete (idempotent: both are success).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeedDeleteOutcome {
+    /// The slot had a seed and it is now gone (`90 00`).
+    Deleted,
+    /// The slot had no seed to begin with (`6A 83`).
+    AlreadyEmpty,
 }
 
 /// Information returned by the `get_info` APDU.
@@ -411,6 +426,36 @@ impl Session {
                 .map_err(|_| TransportError::MalformedResponse("time field"))?,
         );
         Ok(DeviceInfo { serial, utc_time })
+    }
+
+    /// Read a profile's public block (title, occupancy, TOTP config).
+    /// No auth required — the device answers any card holder.
+    pub fn read_public_data(&mut self, profile: u8) -> Result<ProfilePublicData, TransportError> {
+        let cmd = commands::read_public_data(profile);
+        let data = self.transmit(&cmd)?;
+        commands::parse_public_data(&data).map_err(TransportError::PublicData)
+    }
+
+    /// Delete one profile's seed. No authentication required
+    /// (hardware-verified); the destructive-action gate is the caller's
+    /// confirmation, not a device auth step. The stored title survives.
+    pub fn delete_seed(&mut self, profile: u8) -> Result<SeedDeleteOutcome, TransportError> {
+        let cmd = commands::delete_seed(profile);
+        // transmit() treats any non-9000 SW as an error, but 6A 83 here just
+        // means the slot had no seed — benign for a delete. Go through
+        // transmit_raw and map the status words ourselves.
+        let (_, sw1, sw2) = self.transmit_raw(&cmd)?;
+        if sw_completed(sw1, sw2) {
+            return Ok(SeedDeleteOutcome::Deleted);
+        }
+        if sw1 == 0x6A && sw2 == 0x83 {
+            return Ok(SeedDeleteOutcome::AlreadyEmpty);
+        }
+        Err(TransportError::Apdu {
+            label: cmd.label,
+            sw1,
+            sw2,
+        })
     }
 
     /// Run the challenge-response handshake with the given customer key.
