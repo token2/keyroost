@@ -43,6 +43,28 @@ hardware probing found `80 41 00 <profile> 01 70` returns title, occupancy,
 and config in the clear (no key), and `80 E6 00 <profile> 00` deletes a
 seed keylessly. Wire format now in `docs/PROTOCOL.md`.
 
+## Hygiene follow-ups from the slot-overview branch (batch in one small pass)
+
+Triaged fix-laters from the branch's final review — none block the merge:
+
+- [ ] `impl std::error::Error for PublicDataError` so
+      `TransportError::PublicData` chains via `source()` like its
+      OATH/OpenPGP siblings.
+- [ ] `molto slots`: on a mid-sweep read failure, print the slots already
+      read plus an error row instead of aborting the whole command.
+- [ ] Route `info.serial` through `sanitize_cert_field` in the two refusal
+      messages (`molto delete`, `molto reset`) — device-provided bytes reach
+      the terminal unsanitized there (pre-existing pattern).
+- [ ] Repo-wide: keyroostctl panics on EPIPE when stdout is piped to
+      `head`/early-closing consumers; handle `ErrorKind::BrokenPipe` as a
+      quiet exit.
+- [ ] PROTOCOL.md: one line under the `0x41` per-profile body layout noting
+      empty slots may report default config values (SHA1/30/6 observed) —
+      only byte 28 (seed present) indicates occupancy.
+- [ ] GUI: after a factory reset is confirmed on-device, `slot_meta` keeps
+      pre-wipe titles/dots until the device is reselected (hotplug re-enum
+      usually covers it); clear or annotate on reset success.
+
 ## GUI — Text-size control polish ([#42](https://github.com/framefilter/keyroost/issues/42), @token2)
 
 - [ ] Add discrete **"−" / "+" buttons** on the ends of the zoom slider; mouse
