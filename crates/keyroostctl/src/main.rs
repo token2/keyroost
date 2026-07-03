@@ -69,6 +69,22 @@ mod json_out {
         pub drift_seconds: i64,
     }
 
+    /// One element of `keyroostctl molto --json slots` (full parsed block).
+    /// `time_a`/`time_b` are raw big-endian u32s with unconfirmed semantics.
+    #[derive(Serialize)]
+    pub struct MoltoSlotJson {
+        pub slot: u8,
+        pub occupied: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub title: Option<String>,
+        pub flag: u8,
+        pub algorithm: u8,
+        pub time_step: u8,
+        pub digits: u8,
+        pub time_a: u32,
+        pub time_b: u32,
+    }
+
     /// `keyroostctl fido --json info` — the CTAP2 authenticatorGetInfo fields the
     /// human handler prints (plus the CTAPHID transport facts).
     #[derive(Serialize)]
@@ -1299,6 +1315,14 @@ enum ProgCmd {
 enum MoltoCmd {
     /// Print device serial number and on-device UTC time.
     Info,
+    /// List the 100 profile slots: occupancy, title, TOTP config.
+    /// Titles and occupancy are readable by anyone holding the token —
+    /// no customer key is needed (or used).
+    Slots {
+        /// Show all 100 slots, including empty untitled ones.
+        #[arg(long)]
+        all: bool,
+    },
     /// Write a TOTP seed to a profile slot. The seed can come from argv
     /// (--hex/--base32 — visible in `ps` and shell history), an environment
     /// variable, or stdin; supply exactly one source.
@@ -2299,6 +2323,66 @@ fn run_molto(cmd: &MoltoCmd, key: &KeyArgs, debug: bool) -> Result<(), Box<dyn s
         return Ok(());
     }
 
+    // Slots is read-only and needs no auth — the public block answers any
+    // card holder (that's also why the output warns about title privacy).
+    if let MoltoCmd::Slots { all } = cmd {
+        let mut session = Session::open()?;
+        session.set_debug(debug);
+        let info = session.read_info()?;
+        print_info(&info);
+        let mut slots = Vec::with_capacity(100);
+        for p in 0..=99u8 {
+            slots.push(session.read_public_data(p)?);
+        }
+        if json_output() {
+            let out: Vec<json_out::MoltoSlotJson> = slots
+                .iter()
+                .enumerate()
+                .map(|(i, b)| json_out::MoltoSlotJson {
+                    slot: i as u8,
+                    occupied: b.seed_present,
+                    title: b.title.clone(),
+                    flag: b.flag,
+                    algorithm: b.algorithm,
+                    time_step: b.time_step,
+                    digits: b.digits,
+                    time_a: b.time_a,
+                    time_b: b.time_b,
+                })
+                .collect();
+            emit_json(&out)?;
+            return Ok(());
+        }
+        let shown: Vec<_> = slots
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| *all || b.seed_present || b.title.is_some())
+            .collect();
+        if shown.is_empty() {
+            println!("no occupied or titled slots (use --all to list all 100)");
+            return Ok(());
+        }
+        println!(
+            "{:>4}  {:>8}  {:<16}  {:<6}  {:>4}  {:>6}",
+            "slot", "occupied", "title", "algo", "step", "digits"
+        );
+        for (i, b) in shown {
+            println!(
+                "{:>4}  {:>8}  {:<16}  {:<6}  {:>4}  {:>6}",
+                i,
+                if b.seed_present { "yes" } else { "-" },
+                b.title
+                    .as_deref()
+                    .map(sanitize_cert_field)
+                    .unwrap_or_default(),
+                molto_algo_label(b.algorithm),
+                b.time_step,
+                b.digits,
+            );
+        }
+        return Ok(());
+    }
+
     // Factory reset is a plain CLA 0x80 command and needs no auth. Read the
     // (read-only) device info before the --yes gate so even the refusal names
     // exactly which device would be wiped.
@@ -2391,6 +2475,7 @@ fn run_molto(cmd: &MoltoCmd, key: &KeyArgs, debug: bool) -> Result<(), Box<dyn s
 
     match cmd {
         MoltoCmd::Info => unreachable!("handled above before auth"),
+        MoltoCmd::Slots { .. } => unreachable!("handled above before auth"),
         MoltoCmd::Seed {
             profile,
             hex,
@@ -5485,6 +5570,16 @@ fn sanitize_cert_field(s: &str) -> String {
     s.chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect()
+}
+
+/// Human label for the public-block algorithm byte. Same coding as the
+/// config TLV's hmac_algo (1=SHA1, 2=SHA256); anything else prints raw.
+fn molto_algo_label(algo: u8) -> String {
+    match algo {
+        0x01 => "SHA1".into(),
+        0x02 => "SHA256".into(),
+        other => format!("0x{other:02X}"),
+    }
 }
 
 /// A short, single-line preview of a note's text for the `list` view.
