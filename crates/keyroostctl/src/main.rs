@@ -69,7 +69,14 @@ mod json_out {
         pub drift_seconds: i64,
     }
 
-    /// One element of `keyroostctl molto --json slots` (full parsed block).
+    /// `keyroostctl molto --json slots`.
+    #[derive(Serialize)]
+    pub struct MoltoSlotsJson {
+        pub serial: String,
+        pub slots: Vec<MoltoSlotJson>,
+    }
+
+    /// One element of [`MoltoSlotsJson::slots`] (full parsed block).
     /// `time_a`/`time_b` are raw big-endian u32s with unconfirmed semantics.
     #[derive(Serialize)]
     pub struct MoltoSlotJson {
@@ -2361,6 +2368,10 @@ fn run_molto(cmd: &MoltoCmd, key: &KeyArgs, debug: bool) -> Result<(), Box<dyn s
                     time_b: b.time_b,
                 })
                 .collect();
+            let out = json_out::MoltoSlotsJson {
+                serial: info.serial.clone(),
+                slots: out,
+            };
             emit_json(&out)?;
             return Ok(());
         }
