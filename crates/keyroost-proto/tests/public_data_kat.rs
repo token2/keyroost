@@ -116,7 +116,10 @@ fn strict_envelope_rejections() {
     // Outer length not covering exactly the nested TLV.
     let mut bad = good.clone();
     bad[1] = 0x20;
-    assert_eq!(parse_public_data(&bad), Err(PublicDataError::BadOuterLength));
+    assert_eq!(
+        parse_public_data(&bad),
+        Err(PublicDataError::BadOuterLength)
+    );
 
     // Wrong inner tag.
     let mut bad = good.clone();
@@ -126,19 +129,28 @@ fn strict_envelope_rejections() {
     // Wrong inner length.
     let mut bad = good.clone();
     bad[3] = 0x1C;
-    assert_eq!(parse_public_data(&bad), Err(PublicDataError::BadInnerLength));
+    assert_eq!(
+        parse_public_data(&bad),
+        Err(PublicDataError::BadInnerLength)
+    );
 
     // Trailing garbage after the body.
     let mut bad = good.clone();
     bad.push(0x00);
-    assert_eq!(parse_public_data(&bad), Err(PublicDataError::BadOuterLength));
+    assert_eq!(
+        parse_public_data(&bad),
+        Err(PublicDataError::BadOuterLength)
+    );
 
     // Self-consistent forged outer length: buffer extended AND resp[1]
     // updated to match. Must still be rejected, never silently truncated.
     let mut bad = krprobe99_block();
     bad.extend_from_slice(&[0u8; 7]);
     bad[1] = (bad.len() - 2) as u8;
-    assert_eq!(parse_public_data(&bad), Err(PublicDataError::BadOuterLength));
+    assert_eq!(
+        parse_public_data(&bad),
+        Err(PublicDataError::BadOuterLength)
+    );
 }
 
 #[test]

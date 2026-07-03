@@ -14,8 +14,8 @@ pub mod sm4;
 pub use commands::{
     answer_challenge, delete_seed, derive_sm4_key, factory_reset, get_challenge, get_info,
     parse_public_data, read_public_data, set_config, set_customer_key, set_seed, set_title,
-    sw_auth_failed, sw_ok, sync_time, Command, DisplayTimeout, HmacAlgo, OtpDigits,
-    ProfileConfig, ProfilePublicData, PublicDataError, TimeStep, DEFAULT_CUSTOMER_KEY,
+    sw_auth_failed, sw_ok, sync_time, Command, DisplayTimeout, HmacAlgo, OtpDigits, ProfileConfig,
+    ProfilePublicData, PublicDataError, TimeStep, DEFAULT_CUSTOMER_KEY,
 };
 
 /// USB Vendor ID assigned to Token2. Shared across the whole product line —

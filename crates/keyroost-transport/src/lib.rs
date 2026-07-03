@@ -19,7 +19,7 @@
 use std::fmt;
 
 use keyroost_proto::commands::{
-    self, derive_sm4_key, sw_auth_failed, sw_ok, sw_completed, Command, ProfileConfig,
+    self, derive_sm4_key, sw_auth_failed, sw_completed, sw_ok, Command, ProfileConfig,
     ProfilePublicData, PublicDataError,
 };
 use pcsc::{
