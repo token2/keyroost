@@ -7,6 +7,7 @@
 use crate::apdu::{build_apdu, build_apdu_get, mac, pad_iso7816_minimal, CLA_PLAIN, CLA_SECURE};
 use crate::sha1::sha1;
 use crate::sm4::Sm4;
+use std::fmt;
 
 /// Default customer key shipped on a fresh device: ASCII "TOKEN2MOLTO1-KEY".
 pub const DEFAULT_CUSTOMER_KEY: &[u8; 16] = b"TOKEN2MOLTO1-KEY";
@@ -76,6 +77,123 @@ pub fn get_info() -> Command {
         label: "get info (serial + time)",
         apdu: build_apdu_get(CLA_PLAIN, 0x41, 0x00, 0x00, 0x00),
     }
+}
+
+/// `80 41 00 <profile> 01 70` — read a profile's public block: title,
+/// occupancy, and TOTP config. Case-3 only — the device rejects a trailing
+/// Le byte with `6F FB`. No authentication required: anyone with card
+/// access can read every slot's title and occupancy (hardware-verified).
+pub fn read_public_data(profile: u8) -> Command {
+    Command {
+        label: "read public data",
+        apdu: build_apdu(CLA_PLAIN, 0x41, 0x00, profile, &[0x70]),
+    }
+}
+
+/// `80 E6 00 <profile> 00` — delete one profile's seed. Plain command;
+/// hardware-verified to need NO authentication. Returns `90 00` on a
+/// populated slot and `6A 83` (referenced data not found) on an empty one.
+/// The stored title survives the delete — title and seed have independent
+/// lifecycles.
+pub fn delete_seed(profile: u8) -> Command {
+    Command {
+        label: "delete seed",
+        apdu: build_apdu_get(CLA_PLAIN, 0xE6, 0x00, profile, 0x00),
+    }
+}
+
+/// A profile's public block, as returned by [`read_public_data`].
+///
+/// The two time fields are opaque big-endian u32s; their exact semantics
+/// (device RTC / last sync per vendor docs) are unconfirmed, so UIs must
+/// not render them as timestamps.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfilePublicData {
+    pub flag: u8,
+    /// Stored title with trailing zero padding stripped; `None` when the
+    /// slot has no title. Decoded lossily — display never fails.
+    pub title: Option<String>,
+    pub time_a: u32,
+    pub time_b: u32,
+    pub algorithm: u8,
+    pub time_step: u8,
+    pub digits: u8,
+    pub seed_present: bool,
+}
+
+/// Strict-envelope violations from [`parse_public_data`]. Anything that
+/// deviates from the captured `95 1F 70 1D <29 bytes>` shape is an error,
+/// never a guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicDataError {
+    /// Shorter than the 4-byte TLV envelope header.
+    Truncated,
+    /// Leading tag was not `0x95`.
+    BadOuterTag,
+    /// Outer length did not cover exactly the nested TLV.
+    BadOuterLength,
+    /// Nested tag was not `0x70`.
+    BadInnerTag,
+    /// Nested length was not `0x1D` (29).
+    BadInnerLength,
+}
+
+impl fmt::Display for PublicDataError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            PublicDataError::Truncated => "response truncated",
+            PublicDataError::BadOuterTag => "leading tag is not 0x95",
+            PublicDataError::BadOuterLength => "outer TLV length mismatch",
+            PublicDataError::BadInnerTag => "nested tag is not 0x70",
+            PublicDataError::BadInnerLength => "nested length is not 0x1D",
+        };
+        f.write_str(s)
+    }
+}
+
+/// Parse a [`read_public_data`] response (status word already stripped).
+///
+/// Expected envelope, hardware-captured: `95 1F 70 1D` followed by exactly
+/// 29 body bytes — flag, title[16] (plaintext, zero-padded), two u32 BE
+/// time fields, algorithm, time step, digit count, seed-present.
+pub fn parse_public_data(resp: &[u8]) -> Result<ProfilePublicData, PublicDataError> {
+    if resp.len() < 4 {
+        return Err(PublicDataError::Truncated);
+    }
+    if resp[0] != 0x95 {
+        return Err(PublicDataError::BadOuterTag);
+    }
+    if resp[1] as usize != resp.len() - 2 {
+        return Err(PublicDataError::BadOuterLength);
+    }
+    if resp[2] != 0x70 {
+        return Err(PublicDataError::BadInnerTag);
+    }
+    if resp[3] != 0x1D {
+        return Err(PublicDataError::BadInnerLength);
+    }
+    let body = &resp[4..];
+    debug_assert_eq!(body.len(), 29); // guaranteed by the two length checks
+    let raw_title = &body[1..17];
+    let title_len = raw_title.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+    let title = if title_len == 0 {
+        None
+    } else {
+        Some(String::from_utf8_lossy(&raw_title[..title_len]).into_owned())
+    };
+    // Length checks above guarantee these slices; unwraps cannot fail.
+    let time_a = u32::from_be_bytes(body[17..21].try_into().unwrap());
+    let time_b = u32::from_be_bytes(body[21..25].try_into().unwrap());
+    Ok(ProfilePublicData {
+        flag: body[0],
+        title,
+        time_a,
+        time_b,
+        algorithm: body[25],
+        time_step: body[26],
+        digits: body[27],
+        seed_present: body[28] != 0,
+    })
 }
 
 /// `80 4B 08 00 00` — request the 8-byte auth challenge.
