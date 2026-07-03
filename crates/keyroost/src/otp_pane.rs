@@ -288,14 +288,12 @@ impl App {
                     } else {
                         "USB-HID"
                     };
-                    // Over a PC/SC reader (NFC/contact) we skip the best-effort
-                    // serial and device-config reads and go straight to the entry
-                    // enumeration — exactly what the CLI `otp list` does. Two
-                    // reasons: (1) `read_serial` selects the FIDO applet for the
-                    // serial, a detour only needed for display; (2) some contact
-                    // (T=0) readers stall on the Case-2 `READ_CONFIG` APDU, which
-                    // would hang the whole list. Both are cosmetic (serial string,
-                    // HOTP-on-touch hints), so their absence degrades gracefully.
+                    // Over a PC/SC reader (NFC/contact) we still skip the
+                    // best-effort serial read: `read_serial` selects the FIDO
+                    // applet, a detour only needed for display, and a missing
+                    // serial string degrades gracefully. The device-config read
+                    // is no longer skipped — it drives the keyboard-HID toggle —
+                    // but it runs only after enumeration; see below.
                     let pcsc = session.is_pcsc();
                     let serial = if pcsc {
                         None
@@ -307,11 +305,11 @@ impl App {
                     };
                     // Enumerate the codes FIRST. The list is the primary result
                     // and must never be held hostage by the config read below —
-                    // over a T=0 contact reader READ_CONFIG can stall (~20s
-                    // transport timeout) or leave the applet mid-exchange, which
-                    // previously produced an empty list. Reading codes first means
-                    // any config trouble can only cost the (secondary) interface
-                    // toggle, never the codes.
+                    // some contact (T=0) readers stall on the Case-2 READ_CONFIG
+                    // APDU, and the PC/SC transport sets no deadline of its own,
+                    // so a stall lasts as long as the reader driver allows.
+                    // Reading codes first means any config trouble can only cost
+                    // the (secondary) interface toggle, never the codes.
                     let now = unix_now();
                     let entries = session.enumerate(now)?;
                     let rows = entries
@@ -332,12 +330,15 @@ impl App {
                     // hints. Best-effort: `.ok()` swallows a failure so a reader
                     // that can't answer leaves `dev_info` = None (toggle hidden),
                     // exactly as before — and because it runs AFTER enumerate, a
-                    // stall or error here cannot affect the code list.
+                    // stall or error here cannot affect the code list. (The load
+                    // is delivered in one piece, so a stall still costs wall-clock
+                    // time before anything renders — but the list arrives
+                    // complete rather than empty.)
                     //
                     // Over the key's own CCID/NFC this returns the full 64-byte
                     // block (verified on hardware), so the toggle appears. Over a
-                    // genuine T=0 contact reader it may time out; that only costs
-                    // the toggle, not the codes.
+                    // genuine T=0 contact reader it may stall; that costs the
+                    // toggle and the wait, not the codes.
                     let dev_info = session.read_device_info().ok();
                     let (touch_ok, touch_why): (Option<bool>, Option<&'static str>) =
                         match &dev_info {
