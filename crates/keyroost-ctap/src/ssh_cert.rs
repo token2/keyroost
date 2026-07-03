@@ -51,11 +51,13 @@ impl<'a> Reader<'a> {
     }
 
     fn u32(&mut self) -> Option<u32> {
-        self.take(4).map(|b| u32::from_be_bytes(b.try_into().unwrap()))
+        self.take(4)
+            .map(|b| u32::from_be_bytes(b.try_into().unwrap()))
     }
 
     fn u64(&mut self) -> Option<u64> {
-        self.take(8).map(|b| u64::from_be_bytes(b.try_into().unwrap()))
+        self.take(8)
+            .map(|b| u64::from_be_bytes(b.try_into().unwrap()))
     }
 
     fn bytes(&mut self) -> Option<&'a [u8]> {
@@ -252,8 +254,8 @@ pub(crate) mod tests_fixture {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::tests_fixture::FIXTURE_CERT_PUB;
+    use super::*;
 
     fn fixture_wire() -> Vec<u8> {
         let b64 = FIXTURE_CERT_PUB.split_ascii_whitespace().nth(1).unwrap();
@@ -267,7 +269,10 @@ mod tests {
         assert_eq!(info.serial, 42);
         assert_eq!(info.cert_type, CERT_TYPE_USER);
         assert_eq!(info.key_id, "test-key-id");
-        assert_eq!(info.principals, vec!["alice".to_string(), "bob".to_string()]);
+        assert_eq!(
+            info.principals,
+            vec!["alice".to_string(), "bob".to_string()]
+        );
         assert_eq!(info.valid_after, 1767225600);
         assert_eq!(info.valid_before, 1798761600);
         assert_eq!(
@@ -338,7 +343,10 @@ mod tests {
         let lied = format!("ssh-rsa-cert-v01@openssh.com {b64}");
         assert!(parse_text(&lied).is_none());
         // Ordinary public keys (not certs) are not recognized.
-        assert!(parse_text("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB8WYDicxYHAvQ5QE8w24ZO0pod+x5Y7Zcjdk8D3kOpZ user").is_none());
+        assert!(parse_text(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB8WYDicxYHAvQ5QE8w24ZO0pod+x5Y7Zcjdk8D3kOpZ user"
+        )
+        .is_none());
         // Not base64 / not a cert at all.
         assert!(parse_text("hello world").is_none());
         assert!(parse_text("").is_none());

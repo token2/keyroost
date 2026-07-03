@@ -621,7 +621,10 @@ mod tests {
 
     #[test]
     fn capacity_of_empty_array() {
-        let arr = LargeBlobArray { entries: Vec::new(), raw_array: Vec::new() };
+        let arr = LargeBlobArray {
+            entries: Vec::new(),
+            raw_array: Vec::new(),
+        };
         let info = AuthenticatorInfo::default(); // no 0x0B advertised -> spec minimum
         let cap = arr.capacity(&info);
         // Empty CBOR array (0x80, 1 byte) + 16-byte checksum trailer.
@@ -669,8 +672,13 @@ mod tests {
         assert!(matches!(cert_note.classify(), EntryKind::Note(t) if t == FIXTURE_CERT_PUB));
 
         // Wire-format certificate.
-        let wire = base64_decode(FIXTURE_CERT_PUB.split_ascii_whitespace().nth(1).unwrap()).unwrap();
-        let wire_entry = LargeBlobEntry { ciphertext: wire.clone(), nonce: vec![0; 12], orig_size: wire.len() as u64 };
+        let wire =
+            base64_decode(FIXTURE_CERT_PUB.split_ascii_whitespace().nth(1).unwrap()).unwrap();
+        let wire_entry = LargeBlobEntry {
+            ciphertext: wire.clone(),
+            nonce: vec![0; 12],
+            orig_size: wire.len() as u64,
+        };
         match wire_entry.classify() {
             EntryKind::SshCert { info, wire: w } => {
                 assert_eq!(info.key_id, "test-key-id");
@@ -694,7 +702,11 @@ mod tests {
         }
 
         // Random RP bytes stay opaque.
-        let rp = LargeBlobEntry { ciphertext: vec![0xde, 0xad, 0xbe, 0xef], nonce: vec![1; 12], orig_size: 4 };
+        let rp = LargeBlobEntry {
+            ciphertext: vec![0xde, 0xad, 0xbe, 0xef],
+            nonce: vec![1; 12],
+            orig_size: 4,
+        };
         assert!(matches!(rp.classify(), EntryKind::Opaque));
     }
 }

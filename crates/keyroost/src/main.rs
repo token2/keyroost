@@ -8359,7 +8359,11 @@ impl App {
                         cap.max_bytes,
                         cap.free_bytes,
                         cap.entry_count,
-                        if cap.entry_count == 1 { "entry" } else { "entries" },
+                        if cap.entry_count == 1 {
+                            "entry"
+                        } else {
+                            "entries"
+                        },
                     ))
                     .font(theme::f_reg(11.5))
                     .color(p.txt2),

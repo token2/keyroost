@@ -5482,7 +5482,9 @@ fn large_blob_bad_index(index: usize, len: usize) -> Box<dyn std::error::Error> 
 /// string (key IDs, principals, options come from unverified cert bytes)
 /// so a hostile entry cannot inject terminal escape sequences.
 fn sanitize_cert_field(s: &str) -> String {
-    s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
+    s.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
 }
 
 /// A short, single-line preview of a note's text for the `list` view.
