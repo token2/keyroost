@@ -1,7 +1,7 @@
 //! keyroost — desktop GUI for programming Token2 Molto2 / Molto2v2 tokens.
 //!
 //! Dark-themed by default, modeled loosely on Token2's PyQt5 layout: device
-//! status across the top, 100-slot grid on the left, edit form on the right.
+//! status across the top, slot list on the left, edit form on the right.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -22,7 +22,8 @@ use ui::theme::{self, BtnKind, Mode, Palette};
 use eframe::egui;
 use keyroost_import::parse_otpauth;
 use keyroost_proto::commands::{
-    DisplayTimeout, HmacAlgo, OtpDigits, ProfileConfig, TimeStep, DEFAULT_CUSTOMER_KEY,
+    DisplayTimeout, HmacAlgo, OtpDigits, ProfileConfig, ProfilePublicData, TimeStep,
+    DEFAULT_CUSTOMER_KEY,
 };
 use keyroost_transport::Token2ProgSession;
 use keyroost_transport::{DeviceInfo, Session, TransportError};
@@ -1146,6 +1147,11 @@ struct App {
     customer_key_hex: bool,
     /// Currently selected Molto2 profile slot (0..PROFILES-1).
     slot: u8,
+    /// Per-slot public blocks (title / occupancy / config) from the sweep
+    /// that runs when the device is opened. `None` until the sweep has
+    /// succeeded — the slot list then degrades to bare slot numbers.
+    /// Indexed by slot; always 100 entries when `Some`.
+    slot_meta: Option<Vec<ProfilePublicData>>,
     /// Draft of the form fields for `selected` (per-slot; cleared on slot switch).
     draft: Draft,
     /// Rolling log of operations (newest last).
@@ -1801,6 +1807,7 @@ impl App {
                     s.set_config(p, &cfg)
                         .map_err(|e| format!("set_config #{}: {}", p, e))
                 });
+            let refreshed = result.is_ok().then(|| s.read_public_data(p).ok()).flatten();
             Box::new(move |app: &mut App| {
                 app.session = Some(s);
                 match result {
@@ -1810,6 +1817,11 @@ impl App {
                         // liability. Title/config drafts stay — convenient for
                         // programming a run of similar slots.
                         wipe(&mut app.draft.secret_base32);
+                        if let (Some(meta), Some(block)) = (app.slot_meta.as_mut(), refreshed) {
+                            if let Some(slot) = meta.get_mut(p as usize) {
+                                *slot = block;
+                            }
+                        }
                         app.log(Severity::Ok, format!("profile #{} written", p));
                     }
                     Err(e) => app.log(Severity::Err, e),
@@ -4244,6 +4256,7 @@ impl App {
         self.authenticated = false;
         self.session = None;
         self.info = None;
+        self.slot_meta = None;
 
         let Some(dev) = self.selected_device().cloned() else {
             return;
@@ -4263,13 +4276,19 @@ impl App {
             return;
         };
         self.spawn_job("Opening Molto2\u{2026}", move || {
-            let result = (|| -> Result<(Session, DeviceInfo), TransportError> {
+            let result = (|| -> Result<(Session, DeviceInfo, Option<Vec<ProfilePublicData>>), TransportError> {
                 let mut s = Session::open_named(&reader)?;
                 let info = s.read_info()?;
-                Ok((s, info))
+                // Public-block sweep, one APDU per slot (~1-2 s). A failed sweep
+                // degrades to the bare slot list; it must never block the open.
+                let meta = (0..PROFILES)
+                    .map(|p| s.read_public_data(p))
+                    .collect::<Result<Vec<_>, _>>()
+                    .ok();
+                Ok((s, info, meta))
             })();
             Box::new(move |app: &mut App| match result {
-                Ok((s, info)) => {
+                Ok((s, info, meta)) => {
                     app.log(Severity::Ok, format!("opened Molto2 {}", info.serial));
                     // Enumeration's gentle probe usually fills these already;
                     // refresh them here as a fallback in case that read failed.
@@ -4286,6 +4305,7 @@ impl App {
                     }
                     app.session = Some(s);
                     app.info = Some(info);
+                    app.slot_meta = meta;
                     app.authenticated = false;
                 }
                 Err(e) => app.log(Severity::Err, format!("open Molto2: {e}")),
@@ -10993,7 +11013,7 @@ impl App {
                     ui.label(egui::RichText::new("Program a slot").font(theme::f_sb(14.5)).color(p.txt));
                     ui.add_space(4.0);
                     ui.label(
-                        egui::RichText::new("The token is write-only: pick a slot and program it. The Molto2 shows codes on its own screen \u{2014} they can't be read back here.")
+                        egui::RichText::new("Pick a slot and program it. Slot titles and occupancy are readable by anyone holding the token \u{2014} no key needed \u{2014} so don't put secrets in titles. Seeds and codes can't be read back; codes show on the device's own screen.")
                             .font(theme::f_reg(11.5))
                             .color(p.txt3),
                     );
@@ -11023,13 +11043,28 @@ impl App {
                                         egui::Stroke::NONE,
                                         egui::StrokeKind::Inside,
                                     );
+                                    let meta = self
+                                        .slot_meta
+                                        .as_ref()
+                                        .and_then(|m| m.get(s as usize));
+                                    let label = match meta.and_then(|b| b.title.as_deref()) {
+                                        Some(t) => format!("Slot {s:02} \u{00B7} {}", sanitize_title(t)),
+                                        None => format!("Slot {s:02}"),
+                                    };
                                     ui.painter().text(
                                         rect.left_center() + egui::vec2(12.0, 0.0),
                                         egui::Align2::LEFT_CENTER,
-                                        format!("Slot {s:02}"),
+                                        label,
                                         theme::f_mono(12.5),
                                         if selected { p.brand } else { p.txt2 },
                                     );
+                                    if meta.is_some_and(|b| b.seed_present) {
+                                        ui.painter().circle_filled(
+                                            egui::pos2(rect.right() - 12.0, rect.center().y),
+                                            3.0,
+                                            p.brand,
+                                        );
+                                    }
                                     if resp.clicked() {
                                         pick = Some(s);
                                     }
@@ -11745,6 +11780,14 @@ fn oath_row(
         });
     });
     (copy, delete)
+}
+
+/// Flatten control characters out of a device-provided title before display
+/// (same policy as the CLI's sanitize_cert_field).
+fn sanitize_title(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
 }
 
 /// One labelled editor row in the Molto2 form: fixed-width label + a field.
