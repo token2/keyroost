@@ -40,16 +40,28 @@ stored title"). Hardware probing disproved this:
   title and occupancy without a key. Both UIs state this; users must not put
   secrets in titles.
 
-Also newly confirmed from the vendor tooling (MIT-licensed; consulted for
-protocol behavior only, clean-room discipline maintained):
+**INS `0xE6` deletes one profile's seed** — bare `80 E6 00 <profile> 00`,
+plain (non-MAC'd). The vendor tooling (MIT-licensed; consulted for protocol
+behavior only, clean-room discipline maintained) sends it after
+authenticating, and its comments imply auth is required — but **hardware
+disproved that**:
 
-- **INS `0xE6` deletes one profile's seed**: bare `80 E6 00 <profile> 00` —
-  a plain (non-MAC'd) command that is only accepted on a session that has
-  completed the existing challenge/response authentication. Status `63 XX`
-  signals auth failure with attempts remaining in SW2 (matches our existing
-  `sw_auth_failed`).
-- The vendor UI never reads titles back (it decodes only the seed-present
-  byte); surfacing full read-back is net-new UX no other tool offers.
+- On the attached device, an `0xE6` sent with **no authentication at all**
+  deleted slot 99's seed (`seed_present` `01` → `00`) and returned `90 00`.
+  Reproduced twice. Auth is NOT a precondition; the vendor's ordering is
+  incidental. (Same lesson as the mis-framed `0xD8` — vendor source is a
+  hint, not ground truth.)
+- Deleting an **already-empty** slot returns `6A 83` (referenced data not
+  found), not `90 00`.
+- The **title survives seed deletion**: after the seed was wiped, the read
+  block still returned the plaintext title. Title and seed have independent
+  lifecycles.
+- **Device security fact (worth documenting, not ours to fix):** any party
+  with card access can wipe any profile's seed without the customer key.
+  PROTOCOL.md should state this plainly.
+
+The vendor UI never reads titles back (it decodes only the seed-present
+byte); surfacing full read-back is net-new UX no other tool offers.
 
 ## Components
 
@@ -69,7 +81,9 @@ protocol behavior only, clean-room discipline maintained):
     never fail). Titles feed terminal output, so the CLI applies the existing
     control-character flattening used for cert fields.
 - `pub fn delete_seed(profile: u8) -> Command` — bare `80 E6 00 <profile> 00`.
-  Doc comment states the session-auth precondition.
+  Doc comment states: no authentication required (hardware-verified);
+  `90 00` on a populated slot, `6A 83` on an empty one; the title is left
+  intact.
 - Known-answer tests embed the two captured responses (all-zeros block;
   KRPROBE99 block) byte-for-byte, plus envelope-violation rejections
   (truncated body, wrong tags, wrong length, missing SW) and a non-UTF-8
@@ -80,8 +94,11 @@ protocol behavior only, clean-room discipline maintained):
 - `Molto2Session::read_public_data(&mut self, profile: u8) ->
   Result<ProfilePublicData, ...>` — transmit + parse; no auth required.
 - `Molto2Session::delete_seed(&mut self, profile: u8) -> Result<(), ...>` —
-  requires the session to be authenticated first (same flow the existing
-  seed/title/config writes use); surfaces `63 XX` as the existing auth error.
+  transmit + check status. **No authentication needed** (verified). Treat
+  `90 00` as deleted and `6A 83` as "slot was already empty" — the latter is
+  a benign success for a delete, not an error (idempotent). The
+  destructive-action safety is the caller's confirmation gate, not a device
+  auth step.
 
 ### 3. CLI (`keyroostctl molto`)
 
@@ -92,9 +109,10 @@ protocol behavior only, clean-room discipline maintained):
 - **`molto title -p N` with TITLE omitted** — reads and prints slot N's
   current title (clap: make TITLE optional; absent = read mode, no key
   needed; present = existing write path, unchanged).
-- **`molto delete -p N --yes`** — authenticates (same key options as other
-  molto writes), sends `0xE6`. Refuses without `--yes`. Prints the slot's
-  title/occupancy first so the user sees what they are deleting.
+- **`molto delete -p N --yes`** — sends `0xE6` (no key needed). Refuses
+  without `--yes`. Reads and prints the slot's title/occupancy first so the
+  user sees what they are deleting; reports "slot was already empty" on
+  `6A 83`.
 
 ### 4. GUI (Molto2 view)
 
@@ -107,7 +125,9 @@ protocol behavior only, clean-room discipline maintained):
     seed re-entry. Closes the parity gap where `apply_draft` bundles
     seed+title+config and demands the seed.
   - **Delete seed** — confirm-gated (armed button, same as other destructive
-    GUI actions), then auth + `0xE6`, then refresh the slot's public block.
+    GUI actions), then `0xE6` (no auth), then refresh the slot's public
+    block. The title remains after deletion (device behavior); the refreshed
+    block will show it, which is correct.
 - Honesty copy in the view: titles and occupancy are readable by anyone
   holding the token, without a key.
 
@@ -115,7 +135,9 @@ protocol behavior only, clean-room discipline maintained):
 
 - `docs/PROTOCOL.md`: add the `0x41` per-profile read (framing, body layout,
   Case-3-only note, unauthenticated-read security note) and `0xE6`
-  (plain framing, session-auth precondition, `63 XX`).
+  (plain framing; **no auth required — hardware-verified**; `90 00`
+  populated / `6A 83` empty; title survives; and the security note that any
+  card-holder can wipe a seed keyless).
 - `TODO-v0.7.5.md`: replace the stale titles section with a pointer to this
   spec (the CLI title write already existed; read-back exists).
 
@@ -128,11 +150,11 @@ protocol behavior only, clean-room discipline maintained):
   - GUI shows the same; edit slot 99's title from the GUI; confirm on the
     device screen and via `molto title -p 99` read-back;
   - seed slot 99 (safe slot per BRINGUP), confirm occupied appears; then
-    `molto delete -p 99 --yes`, confirm seed-present drops — and observe
-    whether the title survives deletion (unknown; whichever way it goes,
-    document it in PROTOCOL.md);
-  - wrong-key delete attempt surfaces the auth-failure message with
-    attempts remaining.
+    `molto delete -p 99 --yes`, confirm seed-present drops and the title
+    remains (both already observed during spec probing; re-confirm through
+    the shipped code path);
+  - `molto delete` on the now-empty slot 99 reports "already empty" (`6A 83`)
+    rather than erroring.
 
 ## Out of scope
 
@@ -141,11 +163,14 @@ protocol behavior only, clean-room discipline maintained):
 - The FIDO2 large-blob work (separate device concept entirely).
 - Editing TOTP config per slot from the GUI beyond what exists today.
 
-## Open items (settled during implementation, on hardware)
+## Resolved during spec probing (attached hardware)
+
+- `0xE6` needs no auth; `90 00` populated, `6A 83` empty; the title survives
+  a seed delete. (See "What changed" above.)
+
+## Open items (settle during implementation, on hardware)
 
 1. Semantics/endianness of the two 4-byte time fields (display only if
    clearly understood; omit from UIs otherwise).
-2. Behavior of `0xE6` on an empty slot, and whether deletion clears the
-   title.
-3. Whether profile indexing anywhere needs the 1-based labels the device
+2. Whether profile indexing anywhere needs the 1-based labels the device
    screen shows (UIs already label slots; keep wire index 0-based).
