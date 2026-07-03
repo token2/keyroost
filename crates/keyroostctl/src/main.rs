@@ -10,7 +10,7 @@ use keyroost_proto::codec::{base32_decode, hex_decode, hex_encode};
 use keyroost_proto::commands::{
     DisplayTimeout, HmacAlgo, OtpDigits, ProfileConfig, TimeStep, DEFAULT_CUSTOMER_KEY,
 };
-use keyroost_transport::{Session, TransportError};
+use keyroost_transport::{SeedDeleteOutcome, Session, TransportError};
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -1352,11 +1352,23 @@ enum MoltoCmd {
         #[arg(long)]
         base32_stdin: bool,
     },
-    /// Write a profile title (1..=12 ASCII chars).
+    /// Write a profile title (1..=12 ASCII chars), or print the current
+    /// one when TITLE is omitted (reading needs no customer key).
     Title {
         #[arg(short, long)]
         profile: u8,
-        title: String,
+        /// New title; omit to read the slot's stored title instead.
+        title: Option<String>,
+    },
+    /// Delete one profile's seed. The title, if any, survives. Keyless:
+    /// the device accepts this from any card holder (hardware-verified),
+    /// so the only gate is --yes.
+    Delete {
+        #[arg(short, long)]
+        profile: u8,
+        /// Confirm you really want to delete this slot's seed.
+        #[arg(long)]
+        yes: bool,
     },
     /// Set profile TOTP configuration (and seed the clock with the host's UTC time).
     Config {
@@ -2383,6 +2395,63 @@ fn run_molto(cmd: &MoltoCmd, key: &KeyArgs, debug: bool) -> Result<(), Box<dyn s
         return Ok(());
     }
 
+    // Title with TITLE omitted is a read — keyless, like Info/Slots.
+    if let MoltoCmd::Title {
+        profile,
+        title: None,
+    } = cmd
+    {
+        let mut session = Session::open()?;
+        session.set_debug(debug);
+        let block = session.read_public_data(*profile)?;
+        match &block.title {
+            Some(t) => println!("slot #{} title: {}", profile, sanitize_cert_field(t)),
+            None => println!("slot #{} has no title", profile),
+        }
+        println!(
+            "occupied: {}",
+            if block.seed_present { "yes" } else { "no" }
+        );
+        return Ok(());
+    }
+
+    // Delete needs no auth (hardware-verified) — gate on --yes, and show
+    // what's in the slot before touching it.
+    if let MoltoCmd::Delete { profile, yes } = cmd {
+        let mut session = Session::open()?;
+        session.set_debug(debug);
+        let info = session.read_info()?;
+        print_info(&info);
+        let block = session.read_public_data(*profile)?;
+        println!(
+            "slot #{}: occupied: {}, title: {}",
+            profile,
+            if block.seed_present { "yes" } else { "no" },
+            block
+                .title
+                .as_deref()
+                .map(sanitize_cert_field)
+                .unwrap_or_else(|| "(none)".into()),
+        );
+        if !yes {
+            return Err(format!(
+                "refusing to delete slot #{}'s seed on device serial {} without --yes",
+                profile, info.serial
+            )
+            .into());
+        }
+        match session.delete_seed(*profile)? {
+            SeedDeleteOutcome::Deleted => {
+                println!(
+                    "seed deleted from slot #{}; the title (if any) remains",
+                    profile
+                )
+            }
+            SeedDeleteOutcome::AlreadyEmpty => println!("slot #{} was already empty", profile),
+        }
+        return Ok(());
+    }
+
     // Factory reset is a plain CLA 0x80 command and needs no auth. Read the
     // (read-only) device info before the --yes gate so even the refusal names
     // exactly which device would be wiped.
@@ -2476,6 +2545,7 @@ fn run_molto(cmd: &MoltoCmd, key: &KeyArgs, debug: bool) -> Result<(), Box<dyn s
     match cmd {
         MoltoCmd::Info => unreachable!("handled above before auth"),
         MoltoCmd::Slots { .. } => unreachable!("handled above before auth"),
+        MoltoCmd::Delete { .. } => unreachable!("handled above before auth"),
         MoltoCmd::Seed {
             profile,
             hex,
@@ -2516,6 +2586,9 @@ fn run_molto(cmd: &MoltoCmd, key: &KeyArgs, debug: bool) -> Result<(), Box<dyn s
             println!("seed written to profile #{}", profile);
         }
         MoltoCmd::Title { profile, title } => {
+            let title = title
+                .as_deref()
+                .expect("title read mode is handled before auth");
             if title.is_empty() || title.len() > 12 {
                 return Err("title must be 1..=12 bytes".into());
             }
