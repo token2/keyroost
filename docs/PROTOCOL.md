@@ -79,6 +79,8 @@ In the tables below "Lc" is the length of the entire payload (encrypted body
 | INS | P1 | P2 | Payload | Returns | Description |
 |---|---|---|---|---|---|
 | `0x41` | `00` | `00` | — (Le=`00`) | Device info | Serial + system time |
+| `0x41` | `00` | profile (0..99) | `70` (Lc=`01`) | Per-profile public block | Title + occupancy + TOTP config |
+| `0xE6` | `00` | profile (0..99) | — (Lc=`00`) | — (sw=`9000`/`6A83`) | Delete one profile's seed (keyless) |
 | `0x4B` | `08` | `00` | — (Le=`00`) | 8-byte challenge | Start auth handshake |
 | `0xCE` | `00` | `00` | 16-byte SM4(challenge \|\| zeros) | — | Finish auth handshake |
 | `0x56` | `00` | `00` | — (Le=`00`) | — (sw=9000) | Factory reset (physical confirm) |
@@ -96,6 +98,48 @@ offset  length  field
 
 The first 3 and the 2-byte separator are not yet confirmed to be constant; the
 parser tolerates both because Token2's reference does the same.
+
+#### `0x41` per-profile public block (P2 = profile)
+
+`80 41 00 <profile> 01 70` — the same INS as get-info, but P2 selects a
+profile and the body is the single byte `0x70`. **Case-3 only:** appending
+an Le byte is rejected with `6F FB`. The response is a TLV followed by the
+status word:
+
+```
+95 1F
+   70 1D
+      offset  length  field
+      0       1       flag (observed 0x20 on a written slot)
+      1       16      title, PLAINTEXT, zero-padded
+      17      4       time field A (u32 BE; semantics unconfirmed)
+      21      4       time field B (u32 BE; semantics unconfirmed)
+      25      1       OTP algorithm (1=SHA1, 2=SHA256 — same coding as the config TLV)
+      26      1       time step in seconds (0x1E = 30)
+      27      1       digit count (e.g. 0x06)
+      28      1       seed present (00/01)
+```
+
+**No authentication is required**, and the title comes back in the clear:
+the device decrypts the `set_title` ciphertext on receipt and stores
+plaintext (verified live — a title written encrypted read back verbatim).
+Anyone with card access can read every slot's title and occupancy without
+the customer key. Don't put secrets in titles.
+
+#### `0xE6` delete profile seed (keyless)
+
+`80 E6 00 <profile> 00` — deletes one profile's seed. Hardware-verified
+(the vendor tooling happens to send it after authenticating, but auth is
+NOT a precondition — reproduced twice with no auth at all):
+
+- `90 00` on a populated slot; `6A 83` (referenced data not found) on an
+  already-empty one.
+- The stored title survives the delete — title and seed have independent
+  lifecycles. There is no title-delete command short of a factory reset.
+- **Security note:** any party with card access can wipe any profile's
+  seed without the customer key. That is device behavior, documented here
+  so users can weigh it; keyroost gates the operation behind explicit
+  confirmation in both UIs.
 
 ### Secure commands (CLA `0x84`, MAC required)
 
@@ -143,6 +187,7 @@ with the same `D4 01 <profile>` header.
 | `9000` | Success — command completed |
 | `9060` | Success — command queued, awaiting on-device button confirmation (factory reset, set customer key) |
 | `63 NN` | Auth failed; `NN` is attempts remaining before lock |
+| `6A83` | Referenced data not found (e.g. `0xE6` on a slot with no seed) |
 | other `6xxx` / `9xxx` | Command-specific failure |
 
 `9060` is not an error: the device has accepted the request and is waiting for
@@ -154,10 +199,10 @@ they can be retried; everything else becomes `TransportError::Apdu { sw1, sw2 }`
 
 ## Known unknowns
 
-1. **Slot read-back.** No `0x80` plain command is known to return a profile's
-   seed or settings. The customer-key-protected read APDU (if it exists) hasn't
-   been confirmed. Until we have hardware traces from Token2's Windows tool,
-   keyroost treats slots as write-only and tracks state in a local sidecar.
+1. **Seed read-back.** The per-profile public block (`0x41` with
+   P2 = profile) returns each slot's title, occupancy, and TOTP config —
+   but no command is known to return a profile's *seed*, and the two
+   4-byte time fields' semantics are unconfirmed. Seeds remain write-only.
 2. **Screen lock / unlock.** Token2's reference Python script attempts these
    via `INS 0xD8 P1=0x0C P2=0x02`, but the unlock case there is mis-framed and
    probably doesn't work as written. Skipped until verified.

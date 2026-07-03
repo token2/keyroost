@@ -35,17 +35,13 @@ Captured here so they don't get lost. Unchecked = not started.
       whether egui-winit's glue changes incidentally resolve it on Fedora-44 KWin
       while we're here.
 
-## Molto2 — surface the per-profile title (≤12 bytes), per slot
+## Molto2 — slot overview (titles, occupancy, per-slot delete)
 
-- [ ] The `set_title` command already exists at the `keyroost-proto` layer
-      (INS `0xD5`, SM4-ECB of ≤12 UTF-8 bytes, per docs/PROTOCOL.md) but is
-      **write-only and not wired to CLI or GUI**. Surface it as a per-slot
-      editable title in the Molto2 view.
-- [ ] Read-back gap: no known plain command returns a stored title, so the
-      editor is write-only — decide how to present that (optimistic local echo,
-      or "set-only" affordance). Needs hardware confirmation.
-- [ ] Independent of the FIDO large-blob "storage purpose" work — this is the
-      Molto2 device's own label field, not the CTAP large-blob array.
+Superseded by `docs/superpowers/specs/2026-07-03-molto2-slot-overview-design.md`
+and its implementation plan. The old read-back assumption here was wrong:
+hardware probing found `80 41 00 <profile> 01 70` returns title, occupancy,
+and config in the clear (no key), and `80 E6 00 <profile> 00` deletes a
+seed keylessly. Wire format now in `docs/PROTOCOL.md`.
 
 ## GUI — Text-size control polish ([#42](https://github.com/framefilter/keyroost/issues/42), @token2)
 
