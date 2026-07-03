@@ -2329,7 +2329,6 @@ fn run_molto(cmd: &MoltoCmd, key: &KeyArgs, debug: bool) -> Result<(), Box<dyn s
         let mut session = Session::open()?;
         session.set_debug(debug);
         let info = session.read_info()?;
-        print_info(&info);
         let mut slots = Vec::with_capacity(100);
         for p in 0..=99u8 {
             slots.push(session.read_public_data(p)?);
@@ -2353,6 +2352,7 @@ fn run_molto(cmd: &MoltoCmd, key: &KeyArgs, debug: bool) -> Result<(), Box<dyn s
             emit_json(&out)?;
             return Ok(());
         }
+        print_info(&info);
         let shown: Vec<_> = slots
             .iter()
             .enumerate()
