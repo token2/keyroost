@@ -26,7 +26,7 @@ use keyroost_proto::commands::{
     DEFAULT_CUSTOMER_KEY,
 };
 use keyroost_transport::Token2ProgSession;
-use keyroost_transport::{DeviceInfo, Session, TransportError};
+use keyroost_transport::{DeviceInfo, SeedDeleteOutcome, Session, TransportError};
 
 use keyroost_ctap::client_pin::PinUvAuthToken;
 use keyroost_ctap::cred_mgmt::{Credential, CredsMetadata, RelyingParty};
@@ -1220,6 +1220,8 @@ struct App {
     otp_tried: bool,
     /// True while the Molto2 factory-reset confirmation is showing.
     molto_reset_confirm: bool,
+    /// True while the per-slot seed-delete confirmation card is showing.
+    molto_delete_confirm: bool,
     /// True while the selected device's inline rename field is open.
     rename_open: bool,
     /// Friendly-name draft for the selected device.
@@ -1830,6 +1832,81 @@ impl App {
         });
     }
 
+    /// Write only the selected slot's title — no seed re-entry, no config.
+    /// Needs auth (set_title is a secure command); the seed is untouched.
+    fn apply_title_only(&mut self) {
+        if !self.ensure_auth() {
+            return;
+        }
+        let title = self.draft.title.trim().to_owned();
+        if title.is_empty() || title.len() > 12 {
+            self.log(Severity::Err, "title must be 1..=12 bytes");
+            return;
+        }
+        let p = self.slot;
+        let Some(mut s) = self.take_molto_session() else {
+            return;
+        };
+        self.spawn_job(format!("Writing title on #{p}\u{2026}"), move || {
+            let result = s
+                .set_title(p, &title)
+                .map_err(|e| format!("set_title #{}: {}", p, e));
+            let refreshed = result.is_ok().then(|| s.read_public_data(p).ok()).flatten();
+            Box::new(move |app: &mut App| {
+                app.session = Some(s);
+                match result {
+                    Ok(()) => {
+                        if let (Some(meta), Some(block)) = (app.slot_meta.as_mut(), refreshed) {
+                            if let Some(slot) = meta.get_mut(p as usize) {
+                                *slot = block;
+                            }
+                        }
+                        app.log(Severity::Ok, format!("title written on slot #{}", p));
+                    }
+                    Err(e) => app.log(Severity::Err, e),
+                }
+            })
+        });
+    }
+
+    /// Delete the selected slot's seed. Keyless on the wire (the device
+    /// accepts it from any card holder); the GUI's gate is the confirm
+    /// card. The stored title survives — the refreshed block shows it.
+    fn delete_seed_selected(&mut self) {
+        let p = self.slot;
+        let Some(mut s) = self.take_molto_session() else {
+            return;
+        };
+        self.spawn_job(format!("Deleting seed on #{p}\u{2026}"), move || {
+            let result = s
+                .delete_seed(p)
+                .map_err(|e| format!("delete seed #{}: {}", p, e));
+            let refreshed = result.is_ok().then(|| s.read_public_data(p).ok()).flatten();
+            Box::new(move |app: &mut App| {
+                app.session = Some(s);
+                match result {
+                    Ok(outcome) => {
+                        if let (Some(meta), Some(block)) = (app.slot_meta.as_mut(), refreshed) {
+                            if let Some(slot) = meta.get_mut(p as usize) {
+                                *slot = block;
+                            }
+                        }
+                        match outcome {
+                            SeedDeleteOutcome::Deleted => app.log(
+                                Severity::Ok,
+                                format!("seed deleted from slot #{} (title kept)", p),
+                            ),
+                            SeedDeleteOutcome::AlreadyEmpty => {
+                                app.log(Severity::Ok, format!("slot #{} was already empty", p))
+                            }
+                        }
+                    }
+                    Err(e) => app.log(Severity::Err, e),
+                }
+            })
+        });
+    }
+
     fn sync_time_selected(&mut self) {
         if !self.ensure_auth() {
             return;
@@ -2158,6 +2235,14 @@ impl App {
                 }
                 ok += 1;
             }
+            // Public-block sweep, one APDU per slot (~1-2 s) — same soft
+            // pattern as open_molto. A failed sweep must not affect the
+            // import's reported success/failure, nor clobber existing
+            // metadata; it just skips the refresh.
+            let meta = (0..PROFILES)
+                .map(|p| s.read_public_data(p))
+                .collect::<Result<Vec<_>, _>>()
+                .ok();
             Box::new(move |app: &mut App| {
                 app.session = Some(s);
                 for (sev, line) in lines {
@@ -2169,6 +2254,9 @@ impl App {
                     Severity::Warn
                 };
                 app.log(sev, format!("bulk import: {} ok, {} failed", ok, fail));
+                if let Some(m) = meta {
+                    app.slot_meta = Some(m);
+                }
                 if fail == 0 {
                     app.bulk_dialog.open = false;
                 }
@@ -4251,6 +4339,7 @@ impl App {
         self.otp_tried = false;
         self.otp = OtpState::default();
         self.molto_reset_confirm = false;
+        self.molto_delete_confirm = false;
         self.rename_open = false;
         self.rename_input.clear();
         self.authenticated = false;
@@ -11072,6 +11161,7 @@ impl App {
                             });
                             if let Some(s) = pick {
                                 self.slot = s;
+                                self.molto_delete_confirm = false;
                             }
                         });
                         ui.add_space(24.0);
@@ -11160,6 +11250,14 @@ impl App {
                                     self.apply_draft();
                                 }
                                 ui.add_space(6.0);
+                                if theme::button(ui, p, BtnKind::Default, "Write title only").clicked() {
+                                    self.apply_title_only();
+                                }
+                                ui.add_space(6.0);
+                                if theme::button(ui, p, BtnKind::Danger, "Delete seed\u{2026}").clicked() {
+                                    self.molto_delete_confirm = true;
+                                }
+                                ui.add_space(6.0);
                                 if theme::button(ui, p, BtnKind::Default, "Import otpauth\u{2026}").clicked() {
                                     self.import_dialog.open = true;
                                 }
@@ -11176,6 +11274,34 @@ impl App {
                                     self.sync_time_selected();
                                 }
                             });
+                            if self.molto_delete_confirm {
+                                ui.add_space(10.0);
+                                egui::Frame::NONE
+                                    .fill(p.err_soft())
+                                    .inner_margin(egui::Margin::same(12))
+                                    .corner_radius(egui::CornerRadius::same(8))
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "Delete slot {:02}'s seed? Only the seed is wiped \u{2014} the title stays. No key is needed for this: anyone holding the token could do the same.",
+                                                self.slot
+                                            ))
+                                            .font(theme::f_reg(12.5))
+                                            .color(p.txt),
+                                        );
+                                        ui.add_space(8.0);
+                                        ui.horizontal(|ui| {
+                                            if theme::button(ui, p, BtnKind::Danger, "Yes, delete seed").clicked() {
+                                                self.molto_delete_confirm = false;
+                                                self.delete_seed_selected();
+                                            }
+                                            ui.add_space(6.0);
+                                            if theme::button(ui, p, BtnKind::Default, "Cancel").clicked() {
+                                                self.molto_delete_confirm = false;
+                                            }
+                                        });
+                                    });
+                            }
                         });
                     });
                 });
