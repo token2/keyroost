@@ -40,13 +40,16 @@ jobs:
       - name: Check out
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Stage the published site
-        # Publish the static Learn site only. Internal SDD planning/specs under
-        # docs/superpowers/ and any local test screenshots live in the repo but
-        # must not reach the public page.
+        # Publish the static Learn site only. Everything removed below stays in
+        # the repo (and public on github.com) — it's just not surfaced on the
+        # Learn site: internal SDD planning/specs (docs/superpowers/), local
+        # test screenshots (docs/test_photos/), and the top-level source docs
+        # (PROTOCOL/BRINGUP/DEVICE-RESEARCH .md — reference notes, not pages).
         run: |
           mkdir -p _site
           cp -R docs/. _site/
           rm -rf _site/superpowers _site/test_photos
+          rm -f _site/*.md
       - name: Configure Pages
         uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
       - name: Upload artifact
