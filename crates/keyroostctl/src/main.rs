@@ -2447,7 +2447,8 @@ fn run_molto(cmd: &MoltoCmd, key: &KeyArgs, debug: bool) -> Result<(), Box<dyn s
         if !yes {
             return Err(format!(
                 "refusing to delete slot #{}'s seed on device serial {} without --yes",
-                profile, info.serial
+                profile,
+                sanitize_cert_field(&info.serial)
             )
             .into());
         }
@@ -2474,7 +2475,7 @@ fn run_molto(cmd: &MoltoCmd, key: &KeyArgs, debug: bool) -> Result<(), Box<dyn s
         if !yes {
             return Err(format!(
                 "refusing to factory-reset device serial {} without --yes",
-                info.serial
+                sanitize_cert_field(&info.serial)
             )
             .into());
         }
