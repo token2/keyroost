@@ -126,6 +126,10 @@ plaintext (verified live — a title written encrypted read back verbatim).
 Anyone with card access can read every slot's title and occupancy without
 the customer key. Don't put secrets in titles.
 
+Empty slots may report **default config values** (SHA1 / 30s step / 6 digits
+observed on hardware), not all-zero — only byte 28 (seed present) reliably
+indicates occupancy. Don't infer "empty" from the algorithm/step/digit bytes.
+
 #### `0xE6` delete profile seed (keyless)
 
 `80 E6 00 <profile> 00` — deletes one profile's seed. Hardware-verified
