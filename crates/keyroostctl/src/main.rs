@@ -6470,7 +6470,64 @@ fn print_info(info: &keyroost_transport::DeviceInfo) {
     }
 }
 
+/// Exit quietly on a broken output pipe instead of dumping a panic + backtrace.
+///
+/// Rust ignores `SIGPIPE`, so writing to a closed pipe (`keyroostctl … | head`)
+/// turns the next `println!` into a panic ("failed printing to stdout: Broken
+/// pipe") rather than a clean exit. Resetting `SIGPIPE` to `SIG_DFL` is the
+/// idiomatic fix, but it needs an `unsafe` call (forbidden workspace-wide) or
+/// the nightly-only `-Zon-broken-pipe` flag — so instead we intercept that one
+/// panic and exit with 141 (128 + `SIGPIPE`'s signal 13): the status a normal
+/// Unix filter yields on a closed pipe, and exactly what `-Zon-broken-pipe=kill`
+/// will produce once stable. So a `set -o pipefail` pipeline sees the truncation,
+/// and adopting the built-in later won't silently change the exit code.
+///
+/// Detection is by the panic *message* (see [`is_broken_pipe_panic`]). When
+/// `-Zon-broken-pipe` (or the `unix_sigpipe` attribute) reaches stable, delete
+/// this whole dance and adopt the built-in — see TODO-v0.7.5.md.
+fn install_broken_pipe_guard() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = info.payload();
+        let msg = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        if is_broken_pipe_panic(msg) {
+            // 141 = 128 + SIGPIPE(13): the conventional "killed by broken pipe"
+            // status, matching what `-Zon-broken-pipe=kill` will emit once stable.
+            std::process::exit(141);
+        }
+        default_hook(info);
+    }));
+}
+
+/// Whether a panic message signals a broken output pipe.
+///
+/// Broken-pipe panics arrive in two structurally different shapes that share
+/// no common prefix: std's `println!` formats the `io::Error` via `Display`
+/// (`"failed printing to stdout: Broken pipe (os error 32)"`), while
+/// clap_complete's generator formats it via `Debug`
+/// (`"failed to write completion file: Os { code: 32, kind: BrokenPipe, … }"`).
+///
+/// So the match is deliberately **unanchored** — do NOT add a message-prefix
+/// check, it silently misses the clap_complete source (a regression caught by
+/// `tests/broken_pipe.rs`). The tokens are locale-independent where it counts:
+/// `BrokenPipe` (the `Debug` kind name) covers the Debug shape and
+/// `(os error 32)` (the Rust-appended EPIPE errno on Linux/macOS) covers the
+/// Display shape, each surviving a translated non-C `LC_MESSAGES`; the
+/// translatable `strerror` text `"Broken pipe"` is only a last-resort fallback.
+/// Errno 32 is EPIPE on all Unix targets, so a code-32 `io::Error` is always a
+/// broken pipe — a genuine failure like disk-full (`os error 28`) is left to
+/// panic normally.
+fn is_broken_pipe_panic(msg: &str) -> bool {
+    msg.contains("BrokenPipe") || msg.contains("(os error 32)") || msg.contains("Broken pipe")
+}
+
 fn main() -> ExitCode {
+    // A closed output pipe (`… | head`) should exit quietly, not panic.
+    install_broken_pipe_guard();
     // HID enumeration (hidapi walking the system's device tree and parsing
     // report descriptors) is deep enough to exhaust the default main-thread
     // stack in unoptimized debug builds on Windows, where frames are large and
@@ -6505,6 +6562,34 @@ mod cli_tests {
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(args)
+    }
+
+    #[test]
+    fn broken_pipe_panic_detection() {
+        // std println! Display shape (what `molto slots … | head` panics with).
+        assert!(is_broken_pipe_panic(
+            "failed printing to stdout: Broken pipe (os error 32)"
+        ));
+        // clap_complete Debug shape (what `completions … | head` panics with).
+        assert!(is_broken_pipe_panic(
+            "failed to write completion file: Os { code: 32, kind: BrokenPipe, message: \"Broken pipe\" }"
+        ));
+        // Non-C locale: strerror text is translated, but the errno / Debug kind
+        // token still fires, so the guard is not locale-fragile.
+        assert!(is_broken_pipe_panic(
+            "failed printing to stdout: Rohrbruch (os error 32)"
+        ));
+        assert!(is_broken_pipe_panic(
+            "failed to write completion file: Os { code: 32, kind: BrokenPipe, message: \"Rohrbruch\" }"
+        ));
+        // A different print failure (disk full) must NOT be swallowed as success.
+        assert!(!is_broken_pipe_panic(
+            "failed printing to stdout: No space left on device (os error 28)"
+        ));
+        // Unrelated panics fall through to the default hook.
+        assert!(!is_broken_pipe_panic(
+            "index out of bounds: the len is 3 but the index is 5"
+        ));
     }
 
     #[test]

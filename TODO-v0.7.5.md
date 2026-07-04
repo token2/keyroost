@@ -56,9 +56,21 @@ own follow-up branch: the EPIPE panic. Remaining deferred items below.
       OATH/OpenPGP siblings.
 - [ ] `molto slots`: on a mid-sweep read failure, print the slots already
       read plus an error row instead of aborting the whole command.
-- [ ] Repo-wide: keyroostctl panics on EPIPE when stdout is piped to
-      `head`/early-closing consumers; handle `ErrorKind::BrokenPipe` as a
-      quiet exit. **(In progress — own follow-up branch, per user: handle soon.)**
+- [x] Repo-wide: keyroostctl panicked on EPIPE when stdout was piped to
+      `head`/early-closing consumers. **Fixed** on `fix/cli-broken-pipe` via a
+      panic hook that intercepts the broken-pipe panic and exits 0, guarded by
+      `tests/broken_pipe.rs`. See the stabilization-watch item below for the
+      cleaner replacement.
+- [ ] **Watch for stable Rust to land the SIGPIPE fix and swap the workaround
+      out.** The clean fix — libstd resetting `SIGPIPE` to `SIG_DFL` itself, no
+      `unsafe` and no dep in our code — exists only on nightly today as the
+      `-Zon-broken-pipe=kill` compiler flag (formerly the `#[unix_sigpipe]`
+      attribute; tracking issue rust-lang/rust#97889, Unstable Book:
+      `compiler-flags/on-broken-pipe`). When it (or an equivalent) reaches
+      **stable**, delete `install_broken_pipe_guard()` in `keyroostctl/src/main.rs`
+      and its `tests/broken_pipe.rs` guard, and adopt the built-in. Check
+      periodically — it will leave nightly eventually. (Same applies to the
+      `keyroost` GUI binary if it ever grows piped stdout.)
 - [ ] GUI (optional, user's call): an explicit "Refresh slots" control by the
       slot-list header for on-demand re-read — deferred to avoid worsening the
       already-crowded six-button action row.
