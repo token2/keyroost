@@ -64,6 +64,13 @@ Triaged fix-laters from the branch's final review — none block the merge:
 - [ ] GUI: after a factory reset is confirmed on-device, `slot_meta` keeps
       pre-wipe titles/dots until the device is reselected (hotplug re-enum
       usually covers it); clear or annotate on reset success.
+- [ ] GUI: when the open-time sweep fails (`slot_meta` is `None`, common on a
+      flaky Molto2), a successful write can't populate the list — the refresh
+      only patches an already-loaded `slot_meta`. So writes land but the list
+      stays bare until reselect. Consider triggering a re-sweep after a write
+      when `slot_meta` is `None`. (Hardware-verified 2026-07-03 that there is
+      NO device read-after-write lag and the normal refresh path is correct —
+      this None-state gap is the only real display hole.)
 
 ## GUI — Text-size control polish ([#42](https://github.com/framefilter/keyroost/issues/42), @token2)
 
