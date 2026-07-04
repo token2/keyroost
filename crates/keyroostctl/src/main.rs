@@ -6451,7 +6451,10 @@ fn run_probe(session: &mut Session, authed: bool, include_destructive: bool, slo
 }
 
 fn print_info(info: &keyroost_transport::DeviceInfo) {
-    println!("device serial: {}", info.serial);
+    // The serial is `from_utf8_lossy` over device bytes; flatten any control
+    // characters before they reach the terminal (a hostile token could embed
+    // escape sequences). Shared by every command that prints device info.
+    println!("device serial: {}", sanitize_cert_field(&info.serial));
     println!("device UTC:    {} (epoch)", info.utc_time);
     // TOTP tolerates small drift (one 30s step either way at most verifiers);
     // beyond that, codes get rejected in ways users misdiagnose as a bad
