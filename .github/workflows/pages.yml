@@ -1,0 +1,58 @@
+name: Pages
+
+# The Learn site (docs/*.html + assets) is a static site. Deploy it through a
+# curated GitHub Actions build instead of the legacy "deploy from a branch"
+# path: that builder was stalling/erroring for this repo, and a workflow lets
+# us publish only the site itself — keeping internal SDD planning docs
+# (docs/superpowers/) off the public page. It runs only when the docs actually
+# change, so code-only pushes to main no longer trigger a Pages deploy.
+#
+# NOTE: this takes effect only once the repo's Pages source is set to
+# "GitHub Actions" (Settings -> Pages -> Build and deployment -> Source).
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+# Standard Pages deploy permissions: read the repo, write the deployment, and
+# mint the OIDC token deploy-pages verifies with. Nothing else.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One Pages deployment at a time; never cancel an in-flight deploy — a
+# half-applied Pages deploy is worse than a queued one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Stage the published site
+        # Publish the static Learn site only. Internal SDD planning/specs under
+        # docs/superpowers/ and any local test screenshots live in the repo but
+        # must not reach the public page.
+        run: |
+          mkdir -p _site
+          cp -R docs/. _site/
+          rm -rf _site/superpowers _site/test_photos
+      - name: Configure Pages
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+        with:
+          path: _site
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
