@@ -11091,6 +11091,13 @@ impl App {
                     );
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
+                        // Re-read every slot's public block on demand — keyless,
+                        // so it works without authenticating. Covers a factory
+                        // reset (which clears the list) and a failed open-sweep.
+                        if theme::button(ui, p, BtnKind::Default, "Refresh slots").clicked() {
+                            self.resweep_slot_meta();
+                        }
+                        ui.add_space(6.0);
                         if theme::button(ui, p, BtnKind::Default, "Sync time on all").clicked() {
                             self.sync_time_all();
                         }
