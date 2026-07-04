@@ -1824,6 +1824,9 @@ impl App {
                                 *slot = block;
                             }
                         }
+                        if app.slot_meta.is_none() {
+                            app.resweep_slot_meta();
+                        }
                         app.log(Severity::Ok, format!("profile #{} written", p));
                     }
                     Err(e) => app.log(Severity::Err, e),
@@ -1861,6 +1864,9 @@ impl App {
                                 *slot = block;
                             }
                         }
+                        if app.slot_meta.is_none() {
+                            app.resweep_slot_meta();
+                        }
                         app.log(Severity::Ok, format!("title written on slot #{}", p));
                     }
                     Err(e) => app.log(Severity::Err, e),
@@ -1890,6 +1896,9 @@ impl App {
                             if let Some(slot) = meta.get_mut(p as usize) {
                                 *slot = block;
                             }
+                        }
+                        if app.slot_meta.is_none() {
+                            app.resweep_slot_meta();
                         }
                         match outcome {
                             SeedDeleteOutcome::Deleted => app.log(
@@ -2023,11 +2032,40 @@ impl App {
             Box::new(move |app: &mut App| {
                 app.session = Some(s);
                 match result {
-                    Ok(()) => app.log(
-                        Severity::Warn,
-                        "factory-reset requested. Confirm with the ▲ button on the device.",
-                    ),
+                    Ok(()) => {
+                        // The wipe lands only when the user presses the device
+                        // button, and the token stays connected through it with
+                        // no completion signal — so we can't re-read the cleared
+                        // state. Drop the now-doomed titles rather than keep
+                        // showing them; a reselect re-sweeps the blank device.
+                        app.slot_meta = None;
+                        app.log(
+                            Severity::Warn,
+                            "factory-reset requested. Confirm with the \u{25B2} button on the device; reselect it afterward to refresh the slot list.",
+                        );
+                    }
                     Err(e) => app.log(Severity::Err, format!("factory_reset: {}", e)),
+                }
+            })
+        });
+    }
+
+    /// Re-read all 100 public blocks and replace the slot list. Recovers the
+    /// metadata display when a write found no existing list to patch (the
+    /// open-time sweep had failed, leaving `slot_meta` `None`).
+    fn resweep_slot_meta(&mut self) {
+        let Some(mut s) = self.take_molto_session() else {
+            return;
+        };
+        self.spawn_job("Refreshing slots\u{2026}", move || {
+            let meta = (0..PROFILES)
+                .map(|p| s.read_public_data(p))
+                .collect::<Result<Vec<_>, _>>()
+                .ok();
+            Box::new(move |app: &mut App| {
+                app.session = Some(s);
+                if let Some(m) = meta {
+                    app.slot_meta = Some(m);
                 }
             })
         });
