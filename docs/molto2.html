@@ -137,6 +137,55 @@
     </div>
   </section>
 
+  <section class="kr-section" id="troubleshooting">
+    <h2>Troubleshooting</h2>
+    <p>These are behaviors of the Molto2 hardware and the smart-card layer, not
+      bugs in keyroost — any smart-card software talks to the token the same way
+      and sees the same thing.</p>
+
+    <h3>The token stops charging while it's plugged into a computer</h3>
+    <p>The Molto2 stops charging the moment your operating system's smart-card
+      service enumerates it — on Linux, when <code>pcscd</code> brings up the card
+      interface. This happens as soon as the token is detected, before any program
+      authenticates or writes to it, so no particular application causes it. To
+      charge the token, use a <strong>plain USB power source</strong> — a charger
+      or power-only cable with no computer attached. (On a nearly full battery it
+      tops off in about half a minute and then stops, which is normal.)</p>
+
+    <h3>The token isn't detected / doesn't show up</h3>
+    <p>The Molto2's card interface sometimes fails to initialize, so it's present
+      on USB but the smart-card layer never comes up. It can take a minute or two
+      to appear after you plug it in.</p>
+    <ul>
+      <li>Plug it into a <strong>direct USB port</strong> — not a dock or hub.</li>
+      <li>Give it a minute or two to enumerate.</li>
+      <li>If it still doesn't appear, restart the smart-card service and re-check.
+        On Linux: <code>sudo systemctl restart pcscd.socket pcscd</code>, then
+        <code>keyroostctl list</code> (or reopen the app).</li>
+    </ul>
+    <div class="kr-callout danger">
+      <div class="kr-callout-title danger">Only restart the smart-card service when the token is stuck</div>
+      <p>Restarting <code>pcscd</code> <em>while the token has a healthy, active
+        connection</em> pulls the card interface out from under it and hangs the
+        firmware — the screen freezes. Restart it only to recover a token that is
+        already undetected, never one that's working. If it does lock up,
+        <strong>power-cycle the token</strong> (turn it off and back on) and it
+        comes back cleanly.</p>
+    </div>
+
+    <h3>I programmed a slot but it doesn't show a code</h3>
+    <p>A slot shows a rolling code only once it has a <strong>seed</strong> (the
+      TOTP secret). Writing only a <strong>title</strong> sets a label and nothing
+      else — use the full write (seed + title + settings), not the title-only
+      action, when you want the slot to generate codes.</p>
+
+    <h3>Can anyone read my slot titles without the customer key?</h3>
+    <p>Yes. The Molto2 answers title and occupancy reads <strong>without</strong>
+      the customer key, so anyone with physical access to the token can list which
+      slots are used and how they're labeled. <strong>Don't put secrets in slot
+      titles.</strong> Seeds and codes are never readable back off the device.</p>
+  </section>
+
   <section class="kr-section kr-res-section">
     <h2>Authoritative resources</h2>
     <div class="kr-res">
