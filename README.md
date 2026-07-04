@@ -240,9 +240,9 @@ an open industry standard.
 - **Single static binary per OS** — no scripts, no Python, no Qt.
 - **Toward native installs everywhere.** The longer-term goal is first-class
   distribution through each platform's mainstream channels. Available today:
-  Homebrew, AUR, Flatpak, and AppImage, plus the pre-built release binaries and
-  cargo; winget is submitted and pending Microsoft's catalog review. All while
-  continuing to shrink external dependencies toward a self-contained binary.
+  Homebrew, AUR, Flatpak, AppImage, and winget, plus the pre-built release
+  binaries and cargo. All while continuing to shrink external dependencies
+  toward a self-contained binary.
 
 ## Install
 
@@ -311,12 +311,7 @@ yay -S keyroost-bin
 
 ### winget (Windows)
 
-> **Pending Microsoft review.** The manifest is submitted to
-> [microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs) but not yet
-> merged into the public catalog, so the command below will not find the package
-> until it goes live. Until then, use the
-> [pre-built Windows zip](#pre-built-binaries-github-releases). This note will be
-> removed once `winget show Framefilter.Keyroost` resolves.
+Live in the Microsoft catalog ([microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs)):
 
 ```powershell
 winget install Framefilter.Keyroost
