@@ -85,9 +85,12 @@ export APPIMAGE_EXTRACT_AND_RUN=1
 #    KNOWN LIMITATION: keyroost hard-links libpcsclite, so this AppImage needs
 #    libpcsclite.so.1 present on the host to LAUNCH at all. Any host set up for
 #    PC/SC has it (it ships with pcscd); a pure-FIDO host without it cannot start
-#    this AppImage. The real fix — dlopen pcsc at runtime and degrade gracefully
-#    when it is absent — is tracked in TODO-v0.7.5.md; it removes this limitation
-#    and fixes the mismatch for every channel, not just the AppImage.
+#    this AppImage. Step 3b-2 below wraps the launcher so that failure is a clear,
+#    actionable message rather than a cryptic linker error, but the app still
+#    can't run without the library. The real fix — dlopen pcsc at runtime and
+#    degrade gracefully when it is absent — is tracked in TODO-v0.7.5.md; it
+#    removes this limitation and fixes the mismatch for every channel, not just
+#    the AppImage.
 #
 #    Mechanics: deploy WITHOUT --output, delete the auto-bundled libpcsclite,
 #    then package with the appimage plugin directly. (Re-running linuxdeploy with
@@ -111,6 +114,17 @@ mkdir -p "${APPDIR}"
 #     own pcscd) is used at runtime (issue #47 — see the rationale above).
 echo ">> dropping bundled libpcsclite (use the host's, which matches its pcscd)"
 find "${APPDIR}" -name 'libpcsclite.so*' -delete
+
+# 3b-2. Wrap the generated AppRun with a libpcsclite preflight. keyroost
+#       hard-links libpcsclite, so on a host without it this AppImage aborts at
+#       the dynamic linker before main with a cryptic error. The preflight turns
+#       that into an actionable "install pcscd" message; when libpcsclite IS
+#       present it hands off to the real (linuxdeploy) launcher unchanged.
+#       Stopgap until PC/SC is dlopen'd and degrades gracefully (issue #47).
+echo ">> installing libpcsclite preflight launcher"
+[ -f "${APPDIR}/AppRun" ] || { echo "ERROR: linuxdeploy produced no AppRun"; exit 1; }
+mv "${APPDIR}/AppRun" "${APPDIR}/AppRun.real"
+install -m755 "${REPO_ROOT}/packaging/appimage/AppRun.preflight" "${APPDIR}/AppRun"
 
 # 3c. Bundle the AppStream metainfo (software-centre / AppImageHub metadata, #53),
 #     then package. UPDATE_INFORMATION makes the plugin embed gh-releases zsync
