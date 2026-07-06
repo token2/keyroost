@@ -306,7 +306,8 @@ struct ChangePinDialog {
     open: bool,
     old: String,
     new: String,
-    /// Confirmation field, used only when *setting* a first-time PIN.
+    /// Confirmation field for the new PIN — required for both setting a
+    /// first-time PIN and changing an existing one (#79).
     confirm: String,
 }
 
@@ -2986,8 +2987,19 @@ impl App {
         };
         let old = std::mem::take(&mut self.security_keys.change_pin.old);
         let new = std::mem::take(&mut self.security_keys.change_pin.new);
+        let confirm = std::mem::take(&mut self.security_keys.change_pin.confirm);
         if old.is_empty() || new.is_empty() {
             self.security_keys.error = Some("both PIN fields are required".into());
+            return;
+        }
+        // Same validation as set-PIN: catch a mistyped new PIN before it's
+        // committed to the device (a typo here can lock the key — #79).
+        if new.chars().count() < 4 {
+            self.security_keys.error = Some("PIN must be at least 4 characters".into());
+            return;
+        }
+        if new != confirm {
+            self.security_keys.error = Some("the two PINs don't match".into());
             return;
         }
         self.spawn_job("Changing PIN\u{2026}", move || {
@@ -7443,6 +7455,12 @@ impl App {
                         } else {
                             pin_field(ui, p, "Current PIN", &mut self.security_keys.change_pin.old);
                             pin_field(ui, p, "New PIN", &mut self.security_keys.change_pin.new);
+                            pin_field(
+                                ui,
+                                p,
+                                "Confirm new PIN",
+                                &mut self.security_keys.change_pin.confirm,
+                            );
                         }
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
