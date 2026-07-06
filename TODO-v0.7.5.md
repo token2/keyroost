@@ -3,6 +3,34 @@
 Deferred items that are too large or too risky to fold into a same-day patch.
 Captured here so they don't get lost. Unchecked = not started.
 
+## Release-day playbook (SOP)
+
+- [ ] Write a **release-day playbook** — a single checklist doc the release
+      runs from, start to finish. Releases so far have been ad-hoc; as the UI
+      matures the cut needs to be boring and repeatable. Should cover, in
+      order, at least:
+  - pre-flight: clean main, CI green, `cargo audit` green, deps-outdated scan
+    reviewed;
+  - **packaging test branch**: flatpak + AppImage built green BEFORE the tag
+    (rule already in CLAUDE.md "Release process");
+  - new-crate check: any crate added since the last release needs its one-time
+    manual `cargo publish` + Trusted Publishing entry first;
+  - version bump + changelog + tag (signed, `v*` tags are admin-only);
+  - `release.yml` → `publish.yml` fanout watch (GH Release artifacts, crates.io
+    OIDC job, env approval);
+  - **signed binaries (manual, Token2)**: Token2 signs the Windows + macOS
+    builds on their DigiCert hardware token, which **cannot be automated** in
+    CI (physical token access required; see #77). So after the release is cut,
+    obtain their signed builds, attach them as the recommended Windows/macOS
+    assets, and keep keyroost's own attested CI builds alongside — label
+    signed-vs-attested in the release notes so users know who signed what.
+    Folds into the pipeline if/when keyroost gets its own signing identity.
+  - post-release: install-matrix spot check (`cargo install`, flatpak,
+    AppImage, Homebrew tap, winget manifest refresh), GUI/CLI version sanity;
+  - announcement/notes if any.
+- [ ] Decide where it lives (likely `packaging/RELEASING.md`) and whether any
+      steps can become a workflow-dispatch dry-run instead of prose.
+
 ## PC/SC: load libpcsclite at runtime, degrade gracefully (the real #47 fix)
 
 - [ ] Stop hard-linking libpcsclite; **`dlopen` it at runtime** in
