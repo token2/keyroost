@@ -311,6 +311,17 @@ struct ChangePinDialog {
     confirm: String,
 }
 
+impl Drop for ChangePinDialog {
+    /// Zeroize the typed PINs whenever the dialog is dropped — including the
+    /// `= ChangePinDialog::default()` resets on cancel/success — so a typed
+    /// (or mistyped) PIN doesn't linger in the buffer after the form closes.
+    fn drop(&mut self) {
+        wipe(&mut self.old);
+        wipe(&mut self.new);
+        wipe(&mut self.confirm);
+    }
+}
+
 /// State for the OATH (TOTP) pane. The applet is driven over PC/SC, so a
 /// "reader name" identifies the key rather than a hidraw path.
 #[derive(Default)]
@@ -2985,9 +2996,12 @@ impl App {
         let Some(target) = self.selected_fido_target() else {
             return;
         };
-        let old = std::mem::take(&mut self.security_keys.change_pin.old);
-        let new = std::mem::take(&mut self.security_keys.change_pin.new);
-        let confirm = std::mem::take(&mut self.security_keys.change_pin.confirm);
+        // Zeroizing so the in-use copies (moved into the job, and any dropped on
+        // an early return below) don't leave the PIN in freed memory.
+        let old = zeroize::Zeroizing::new(std::mem::take(&mut self.security_keys.change_pin.old));
+        let new = zeroize::Zeroizing::new(std::mem::take(&mut self.security_keys.change_pin.new));
+        let confirm =
+            zeroize::Zeroizing::new(std::mem::take(&mut self.security_keys.change_pin.confirm));
         if old.is_empty() || new.is_empty() {
             self.security_keys.error = Some("both PIN fields are required".into());
             return;
@@ -2998,7 +3012,7 @@ impl App {
             self.security_keys.error = Some("PIN must be at least 4 characters".into());
             return;
         }
-        if new != confirm {
+        if *new != *confirm {
             self.security_keys.error = Some("the two PINs don't match".into());
             return;
         }
@@ -3037,13 +3051,14 @@ impl App {
         let Some(target) = self.selected_fido_target() else {
             return;
         };
-        let new = std::mem::take(&mut self.security_keys.change_pin.new);
-        let confirm = std::mem::take(&mut self.security_keys.change_pin.confirm);
+        let new = zeroize::Zeroizing::new(std::mem::take(&mut self.security_keys.change_pin.new));
+        let confirm =
+            zeroize::Zeroizing::new(std::mem::take(&mut self.security_keys.change_pin.confirm));
         if new.chars().count() < 4 {
             self.security_keys.error = Some("PIN must be at least 4 characters".into());
             return;
         }
-        if new != confirm {
+        if *new != *confirm {
             self.security_keys.error = Some("the two PINs don't match".into());
             return;
         }
@@ -7361,10 +7376,10 @@ impl App {
                     };
                     if theme::button(ui, p, kind, label).clicked() {
                         let open = !self.security_keys.change_pin.open;
-                        self.security_keys.change_pin = ChangePinDialog {
-                            open,
-                            ..Default::default()
-                        };
+                        // Replacing the dialog drops the old one, whose Drop
+                        // zeroizes any typed PINs; then restore the toggle state.
+                        self.security_keys.change_pin = ChangePinDialog::default();
+                        self.security_keys.change_pin.open = open;
                         self.security_keys.error = None;
                     }
                     // Lock the whole session here, where the lock/unlock state
