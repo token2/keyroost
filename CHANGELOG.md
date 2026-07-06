@@ -6,6 +6,56 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-07-06
+
+### Added
+- **Molto2 slot overview.** keyroost now reads each profile slot's stored title,
+  occupancy, and TOTP configuration directly from the token, so the GUI slot
+  list and the new `keyroostctl molto slots` command show what's actually on the
+  device instead of tracking it blind. Adds title-only editing (rename a slot
+  without re-entering its seed), per-slot **seed deletion** (`keyroostctl molto
+  delete`, confirm-gated in the GUI), title read-back (`molto title -p <N>`), and
+  a "Refresh slots" button that re-reads on demand. The wire format is documented
+  in `docs/PROTOCOL.md`. **Security note:** slot titles and occupancy are
+  readable by anyone holding the token — no customer key needed — so don't put
+  secrets in titles.
+- **FIDO2 large-blob legibility.** The Storage view classifies each large-blob
+  entry (keyroost note / OpenSSH certificate / opaque relying-party data),
+  decodes recognized ones (including parsed SSH-certificate validity), shows a
+  capacity meter, and can export any entry to a file. `keyroostctl large-blob
+  list`/`get` gain the same classification and a capacity line, plus a new
+  `export` subcommand.
+
+### Fixed
+- **Change-PIN now confirms the new PIN.** The GUI change-PIN flow asked for the
+  new PIN only once, unlike the set-PIN flow, so a typo could be committed and
+  lock the key. It now requires a matching confirmation entry with the same
+  validation as set-PIN, and zeroizes the typed PINs from memory when the dialog
+  closes. Thanks to [@token2](https://github.com/token2) and @jurjendevries
+  ([#79](https://github.com/framefilter/keyroost/issues/79)).
+- **AppImage: a clear message when `libpcsclite` is missing.** The AppImage needs
+  the host's PC/SC client library to start; without it the app aborted at the
+  dynamic linker with a cryptic error. It now prints an actionable,
+  per-distribution "install pcscd" message instead
+  ([#78](https://github.com/framefilter/keyroost/issues/78)).
+- **The CLI no longer panics on a closed output pipe.** Piping long output into
+  `head` (or any early-closing reader) dumped a Rust backtrace; it now exits
+  quietly, like a normal Unix filter.
+- **Terminal-escape hardening.** Device-provided strings — serial numbers,
+  certificate fields, Molto2 titles — are stripped of control characters before
+  they reach the terminal, closing an escape-injection vector.
+- The GUI's Molto2 slot list refreshes after writes and factory resets instead
+  of showing stale data, and `keyroostctl molto slots --json` emits a
+  serial-bearing, parseable JSON object.
+
+### Changed
+- The Learn site (`framefilter.github.io/keyroost`) gains a Molto2
+  troubleshooting section and now deploys through a GitHub Actions workflow.
+  `docs/PROTOCOL.md` documents the Molto2 per-profile read (`0x41`) and keyless
+  seed delete (`0xE6`).
+- **winget:** `Framefilter.Keyroost` is now live in the Microsoft catalog —
+  `winget install Framefilter.Keyroost`.
+
 ## [0.7.3] - 2026-06-30
 
 ### Added
@@ -453,7 +503,9 @@ multi-vendor hardware-security-key manager, then took its neutral name. Highligh
   external dependencies are `pcsc`, `clap`, `eframe`/`egui`, `serde`, and
   (for RSA keygen/parsing) `rsa`/`rand`.
 
-[Unreleased]: https://github.com/framefilter/keyroost/compare/v0.7.2...HEAD
+[Unreleased]: https://github.com/framefilter/keyroost/compare/v0.7.4...HEAD
+[0.7.4]: https://github.com/framefilter/keyroost/compare/v0.7.3...v0.7.4
+[0.7.3]: https://github.com/framefilter/keyroost/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/framefilter/keyroost/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/framefilter/keyroost/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/framefilter/keyroost/compare/v0.6.0...v0.7.0
