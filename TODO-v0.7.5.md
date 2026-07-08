@@ -17,7 +17,15 @@ Captured here so they don't get lost. Unchecked = not started.
     manual `cargo publish` + Trusted Publishing entry first;
   - version bump + changelog + tag (signed, `v*` tags are admin-only);
   - `release.yml` → `publish.yml` fanout watch (GH Release artifacts, crates.io
-    OIDC job, env approval);
+    OIDC job, env approval). **Verify each channel actually PUBLISHED, not just
+    that the job went green** — the crates.io / Homebrew / winget / AUR jobs
+    skip-with-a-notice (and still exit `success`) when their secret is absent, so
+    a green check can mask a no-op. Confirm concretely: crates.io shows the new
+    version, the Homebrew tap formula bumped, and a winget PR was opened. winget
+    needs the `WINGET_TOKEN` secret (classic PAT, `public_repo` scope, held by
+    the maintainer — it **silently skips again when the PAT expires**); AUR is
+    externally blocked (registry not accepting submissions during the
+    supply-chain incident) — skip by design, revisit when it reopens;
   - **signed binaries (manual, Token2)**: Token2 signs the Windows + macOS
     builds on their DigiCert hardware token, which **cannot be automated** in
     CI (physical token access required; see #77). So after the release is cut,
